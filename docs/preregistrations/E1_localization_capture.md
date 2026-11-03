@@ -79,4 +79,12 @@ The same rule is applied to T_fav. If T_pick and T_fav disagree, the result is c
 Model identifiers and exact counts per tier are fixed in the config committed before each run. Pilot data are used only to check the pipeline and timing, and are excluded from all inference.
 
 ## Change log
-None yet.
+All entries below were made before any data was collected.
+
+2026-11-04, implementation choices the text above left open or that compute forces:
+- **Positions per cell.** Pilot and small tiers run 5 and 1 positions per (concept, cluster) cell, balanced within clusters, because ten per cell does not fit CPU budgets. The large tier runs all ten. With fewer positions, priors cancel only through balance across cells, not within each cell. Small-tier estimates are weaker for this reason.
+- **Random conditions.** Pilot and small tiers run random directions on T_inj only, which is what H3 needs. Both random conditions share one direction per concept.
+- **Impact matching.** Jensen-Shannon divergence in nats on the next-token distribution at the last prompt token, since the design scores only the first token. Ferrara eq. 6 averages over teacher-forced positions; this is the single-position case.
+- **Holm.** Applied separately to the `L_t > 0` family and the `L_inj - L_t > 0` family. Bounds on `C_t` are unadjusted.
+- **Undefined share.** `C_t` is reported as undefined when `|L_inj|` is below 0.05 logits.
+- **Power.** Small-tier counts (10 concepts, 5 clusters as first sized) give a thin bootstrap. Counts may be raised once the pilot gives measured timing, before small-tier data exist.

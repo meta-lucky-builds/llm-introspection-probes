@@ -1,0 +1,23 @@
+{
+  "calibration": [
+    "dust", "satellites", "trumpets", "origami", "illusions", "cameras", "lightning",
+    "constellations", "treasures", "telephones", "avalanches", "fountains", "quarries",
+    "sadness", "xylophones", "secrecy", "oceans", "information", "kaleidoscopes", "vegetables",
+    "poetry", "aquariums", "peace", "caverns", "memories", "frost", "volcanoes", "boulders",
+    "harmonies", "masquerades", "rubber", "plastic", "blood", "amphitheaters", "contraptions",
+    "youth", "dynasties", "snow", "dirigibles", "algorithms", "denim", "monoliths", "silver",
+    "justice", "gravity", "betrayal", "pirates", "glaciers", "democracy", "vampires",
+    "chemistry", "loneliness", "robots", "cathedrals", "jazz", "tigers", "inflation", "courage",
+    "mythology", "submarines"
+  ],
+  "test": [
+    "copper", "dreams", "whales", "fireworks", "philosophy", "castles", "nostalgia", "dragons",
+    "electricity", "tea", "freedom", "microscopes", "rainbows", "ghosts", "economics", "ballet",
+    "spiders", "wisdom", "thunder", "knights", "ambition", "telescopes", "coral", "sculpture",
+    "anger", "mountains", "wine", "viruses", "pyramids", "hope", "comets", "samurai", "fashion",
+    "gold", "bees", "jealousy", "opera", "tsunamis", "astronauts", "mathematics", "cinnamon",
+    "evolution", "lions", "tradition", "windmills", "fear", "rockets", "painting", "vikings",
+    "curiosity", "glass", "dolphins", "revolution", "chocolate", "silence", "lighthouses",
+    "medicine", "wolves", "laughter", "empires"
+  ]
+}

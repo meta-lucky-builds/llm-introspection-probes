@@ -1,0 +1,22 @@
+{
+  "calibration": {
+    "kitchenware": ["spoon", "fork", "plate", "bowl", "cup", "knife", "pan", "oven", "sink", "stove", "kettle", "napkin", "jar", "lid"],
+    "furniture": ["chair", "table", "shelf", "desk", "sofa", "bench", "stool", "drawer", "cabinet", "bed", "mirror", "lamp", "rug", "curtain"],
+    "garden": ["shovel", "fence", "hose", "rake", "soil", "seed", "pot", "bush", "hedge", "gate", "path", "pond", "shed", "grass"],
+    "stationery": ["pen", "paper", "folder", "stapler", "ruler", "eraser", "notebook", "envelope", "binder", "marker", "printer", "keyboard", "clip", "calendar"],
+    "clothing": ["shirt", "jacket", "scarf", "glove", "sock", "boot", "hat", "belt", "coat", "dress", "skirt", "sweater", "button", "pocket"],
+    "street": ["road", "bridge", "sign", "corner", "sidewalk", "lane", "curb", "traffic", "parking", "tunnel", "bus", "taxi", "bicycle", "truck"]
+  },
+  "test": {
+    "tools": ["hammer", "wrench", "drill", "saw", "nail", "screw", "bolt", "ladder", "bucket", "tape", "rope", "pliers", "broom", "axe"],
+    "produce": ["apple", "pear", "peach", "plum", "grape", "lemon", "carrot", "onion", "potato", "tomato", "pepper", "bean", "pea", "cabbage"],
+    "house_parts": ["roof", "wall", "floor", "door", "window", "stairs", "ceiling", "basement", "attic", "porch", "garage", "hallway", "chimney", "balcony"],
+    "school": ["pencil", "chalk", "classroom", "backpack", "lesson", "homework", "teacher", "student", "textbook", "library", "cafeteria", "gym", "locker", "playground"],
+    "landscape": ["hill", "valley", "river", "lake", "meadow", "stream", "beach", "cliff", "island", "forest", "field", "desert", "canyon", "shore"],
+    "bathroom": ["towel", "soap", "shampoo", "brush", "comb", "sponge", "razor", "toothbrush", "bathtub", "shower", "faucet", "toilet", "tissue", "bathrobe"],
+    "farm_animals": ["horse", "cow", "sheep", "goat", "pig", "chicken", "duck", "rabbit", "deer", "mouse", "squirrel", "turtle", "frog", "owl"],
+    "groceries": ["bread", "butter", "cheese", "milk", "egg", "rice", "pasta", "soup", "salad", "sauce", "flour", "sugar", "salt", "honey"],
+    "travel": ["train", "plane", "boat", "ship", "subway", "ferry", "station", "airport", "platform", "ticket", "luggage", "suitcase", "passport", "harbor"],
+    "play": ["card", "dice", "chess", "ball", "kite", "puzzle", "doll", "marble", "balloon", "toy", "game", "board", "tent", "blanket"]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "tier": "large",
+  "inference_allowed": true,
+  "seed": 20261104,
+  "model": {"name": "google/gemma-3-12b-it", "revision": "main"},
+  "data_dir": "../data",
+  "concept_prompt_mode": "chat",
+  "design": {
+    "n_concepts_calibration": 20,
+    "n_clusters_calibration": 5,
+    "positions_per_cell_calibration": 5,
+    "n_concepts_test": 40,
+    "n_clusters_test": 10,
+    "positions_per_cell_test": 10,
+    "fact_queries_per_trial": 3,
+    "test_task_conditions": {
+      "T_inj": ["concept", "random_norm", "random_impact"],
+      "T_pick": ["concept", "random_norm", "random_impact"],
+      "T_fav": ["concept", "random_norm", "random_impact"],
+      "T_odd": ["concept", "random_norm", "random_impact"],
+      "T_fact": ["concept", "random_norm", "random_impact"],
+      "T_inj_none": ["concept", "random_norm", "random_impact"]
+    }
+  },
+  "grid": {"layers": [0, 1, 2, 3, 4, 6, 9, 12, 20, 30, 40], "alphas": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]},
+  "impact_search": {"max_evals": 8, "tolerance": 0.05, "max_scale": 32.0},
+  "screening": {"enabled": true, "top_fraction": 0.5, "positions_per_cell": 10},
+  "runtime": {"batch_size_cpu": 4, "batch_size_gpu": 8, "segment_seconds": 3000},
+  "analysis": {"n_bootstrap": 2000, "min_denominator": 0.05}
+}

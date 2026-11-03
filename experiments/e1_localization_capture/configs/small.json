@@ -1,0 +1,30 @@
+{
+  "tier": "small",
+  "inference_allowed": true,
+  "seed": 20261104,
+  "model": {"name": "Qwen/Qwen3-1.7B", "revision": "main"},
+  "data_dir": "../data",
+  "concept_prompt_mode": "chat",
+  "design": {
+    "n_concepts_calibration": 5,
+    "n_clusters_calibration": 2,
+    "positions_per_cell_calibration": 2,
+    "n_concepts_test": 10,
+    "n_clusters_test": 5,
+    "positions_per_cell_test": 1,
+    "fact_queries_per_trial": 1,
+    "test_task_conditions": {
+      "T_inj": ["concept", "random_norm", "random_impact"],
+      "T_pick": ["concept"],
+      "T_fav": ["concept"],
+      "T_odd": ["concept"],
+      "T_fact": ["concept"],
+      "T_inj_none": ["concept"]
+    }
+  },
+  "grid": {"layers": [0, 3, 10], "alphas": [2.0, 4.0, 6.0]},
+  "impact_search": {"max_evals": 4, "tolerance": 0.1, "max_scale": 32.0},
+  "screening": {"enabled": false, "top_fraction": 0.5, "positions_per_cell": 1},
+  "runtime": {"batch_size_cpu": 4, "batch_size_gpu": 32, "segment_seconds": 1500},
+  "analysis": {"n_bootstrap": 2000, "min_denominator": 0.05}
+}
