@@ -6,7 +6,7 @@ from conftest import tiny_llama, tiny_qwen
 from torch import nn
 
 from mechinterp.hooks import capture_layer_outputs, inject, inject_activation
-from mechinterp.modeling import choose_dtype, forward_last_logits, get_layers
+from mechinterp.modeling import choose_dtype, forward_last_logits, get_layers, resolve_model_commit
 from mechinterp.prompts import LABELS
 from mechinterp.scoring import localization_effect
 from mechinterp.vectors import random_unit_vector
@@ -59,8 +59,14 @@ def test_layer_fallback_paths() -> None:
         get_layers(nn.Linear(2, 2))
 
 
-def test_dtype_per_device() -> None:
+def test_float32_on_every_device_so_logits_do_not_tie() -> None:
     assert choose_dtype(torch.device("cpu")) == torch.float32
+    assert choose_dtype(torch.device("cuda")) == torch.float32
+
+
+def test_a_pinned_commit_resolves_to_itself_without_network() -> None:
+    commit = "c1899de289a04d12100db370d81485cdf75e47ca"
+    assert resolve_model_commit("any/model", commit) == commit
 
 
 @pytest.mark.parametrize("builder", [tiny_qwen, tiny_llama])

@@ -2,9 +2,8 @@
   "tier": "large",
   "inference_allowed": true,
   "seed": 20261104,
-  "model": {"name": "meta-llama/Llama-3.1-8B-Instruct", "revision": "main"},
+  "model": {"name": "meta-llama/Llama-3.1-8B-Instruct", "revision": "0e9e39f249a16976918f6564b8830bc894c89659"},
   "data_dir": "../data",
-  "concept_prompt_mode": "chat",
   "design": {
     "n_concepts_calibration": 20,
     "n_clusters_calibration": 5,

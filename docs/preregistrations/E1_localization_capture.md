@@ -88,3 +88,17 @@ All entries below were made before any data was collected.
 - **Holm.** Applied separately to the `L_t > 0` family and the `L_inj - L_t > 0` family. Bounds on `C_t` are unadjusted.
 - **Undefined share.** `C_t` is reported as undefined when `|L_inj|` is below 0.05 logits.
 - **Power.** Small-tier counts (10 concepts, 5 clusters as first sized) give a thin bootstrap. Counts may be raised once the pilot gives measured timing, before small-tier data exist.
+
+2026-11-04, after independent code review ([review](../reviews/E1_harness_review.md)), still before any data:
+- **Correction to the entry above.** The small tier runs 2 positions per cell, not 1, so each concept sees both position parities. It uses 10 concepts and 10 clusters, about 1,082 prompts.
+- **Sparse design.** At the small tier each concept meets 5 of the 10 clusters, in a cyclic design. Ten clusters still under-cover (about 90% for a nominal 95%); the output report states this, so small-tier intervals are read as optimistic.
+- **Grid and tasks at the small tier.** Alpha is limited to {3, 6}, which covers Zou's selected range but not smaller strengths. T_inj_none is dropped. Calibration uses 2 positions per cell.
+- **Concept vector read site.** The "." ending the user's message in the chat rendering, instead of the template's final token, which sits after the generation prompt and may carry little concept content at early layers.
+- **Pilot stimuli.** The pilot uses its own concepts and clusters, disjoint from calibration and test, so test estimates stay unseen.
+- **H3.** Reported as uninformative if the achieved impact match misses the target by more than 10% (5% at the large tier).
+- **Capture share.** A negative `L_inj`, like a near-zero one, makes `C_t` undefined.
+- **Selection tie-break.** Smallest alpha, then earliest layer.
+- **Numerics.** float32 at all tiers. Non-finite values raise an error rather than producing a verdict.
+- **Label mass.** Total probability on the labels under injection is reported per task. It is descriptive, with a warning below 0.5.
+- **Screening.** The secondary analysis uses test concepts on calibration clusters, and is off at the small tier.
+- **Prompt details.** Instruction comes before the list. `none` is matched as lowercase only.

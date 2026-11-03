@@ -9,10 +9,13 @@ from mechinterp.prompts import (
     LABELS,
     TASKS,
     AnswerTokenError,
+    TokenLocationError,
     build_prompt,
+    concept_prompt_text,
     decode_token,
     instruction_for,
     is_single_token_word,
+    locate_user_content_end,
     render_chat,
     resolve_answer_token,
     resolve_label_ids,
@@ -148,8 +151,32 @@ def test_ignored_enable_thinking_is_an_error() -> None:
         render_chat(_FakeChatTokenizer("t", strict=False, rendered="a\n<think>\n"), "hi")
 
 
-def test_real_jinja_template_with_thinking_disabled(tokenizer) -> None:
-    pytest.importorskip("jinja2")
+def test_read_site_is_the_period_ending_the_user_message(tokenizer) -> None:
+    text = concept_prompt_text("concaa")
+    rendered = f"user\n{text}\nassistant\n<think>\n\n</think>\n\n"
+    input_ids, index = locate_user_content_end(tokenizer, rendered, text)
+    assert decode_token(tokenizer, input_ids[index]) == "."
+    assert decode_token(tokenizer, input_ids[index - 1]).strip() == "concaa"
+    assert index < len(input_ids) - 1
+
+
+def test_read_site_refuses_a_token_that_is_not_the_period() -> None:
+    glued = make_tokenizer(["Tell me about concaa."], r" ?[A-Za-z.]+|\n|[^A-Za-z.\n ]| ")
+    text = concept_prompt_text("concaa")
+    with pytest.raises(TokenLocationError):
+        locate_user_content_end(glued, f"{text}\n", text)
+
+
+def test_read_site_refuses_a_message_that_is_missing_or_repeated(tokenizer) -> None:
+    text = concept_prompt_text("concaa")
+    with pytest.raises(TokenLocationError):
+        locate_user_content_end(tokenizer, "user\n", text)
+    with pytest.raises(TokenLocationError):
+        locate_user_content_end(tokenizer, f"{text}\n{text}", text)
+
+
+def test_real_jinja_template_with_thinking_disabled() -> None:
+    # jinja2 is installed explicitly in CI, so this test cannot skip silently.
     qwen3_like = make_tokenizer(["<x>", "</x>", "0 1 2 3"])
     qwen3_like.chat_template = (
         "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}"

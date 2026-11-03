@@ -23,6 +23,8 @@ class DesignConfig:
     positions_per_cell_test: int
     fact_queries_per_trial: int
     test_task_conditions: dict[str, list[str]]
+    # None means fully crossed. Otherwise each concept meets this many clusters, in a cyclic design.
+    clusters_per_concept_test: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,7 @@ class Config:
     model_name: str
     model_revision: str
     data_dir: Path
-    concept_prompt_mode: str
+    data_pool: str
     design: DesignConfig
     grid: GridConfig
     impact_search: ImpactSearchConfig
@@ -88,7 +90,7 @@ class Config:
             model_name=raw["model"]["name"],
             model_revision=raw["model"].get("revision", "main"),
             data_dir=data_dir,
-            concept_prompt_mode=raw.get("concept_prompt_mode", "chat"),
+            data_pool=raw.get("data_pool", "main"),
             design=DesignConfig(**raw["design"]),
             grid=GridConfig(layers=list(raw["grid"]["layers"]), alphas=[float(a) for a in raw["grid"]["alphas"]]),
             impact_search=ImpactSearchConfig(**raw["impact_search"]),
@@ -121,8 +123,10 @@ class Config:
                 raise ValueError(f"{task} has unknown conditions {sorted(unknown)}")
         if not 1 <= self.design.fact_queries_per_trial <= 9:
             raise ValueError("fact_queries_per_trial must be between 1 and 9")
-        if self.concept_prompt_mode not in ("chat", "raw"):
-            raise ValueError("concept_prompt_mode must be 'chat' or 'raw'")
+        if self.data_pool not in ("main", "pilot"):
+            raise ValueError("data_pool must be 'main' or 'pilot'")
+        if (self.data_pool == "pilot") == self.inference_allowed:
+            raise ValueError("Runs excluded from inference use the pilot pool, and only those runs do")
         if self.impact_search.max_evals < 1:
             raise ValueError("impact_search.max_evals must be at least 1")
         if not (self.grid.layers and self.grid.alphas):

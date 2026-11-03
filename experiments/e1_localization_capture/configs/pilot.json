@@ -2,9 +2,9 @@
   "tier": "pilot",
   "inference_allowed": false,
   "seed": 20261104,
-  "model": {"name": "Qwen/Qwen3-0.6B", "revision": "main"},
+  "model": {"name": "Qwen/Qwen3-0.6B", "revision": "c1899de289a04d12100db370d81485cdf75e47ca"},
   "data_dir": "../data",
-  "concept_prompt_mode": "chat",
+  "data_pool": "pilot",
   "design": {
     "n_concepts_calibration": 2,
     "n_clusters_calibration": 1,
@@ -23,7 +23,7 @@
     }
   },
   "grid": {"layers": [3, 9], "alphas": [3.0, 6.0]},
-  "impact_search": {"max_evals": 3, "tolerance": 0.1, "max_scale": 32.0},
+  "impact_search": {"max_evals": 4, "tolerance": 0.1, "max_scale": 32.0},
   "screening": {"enabled": false, "top_fraction": 0.5, "positions_per_cell": 5},
   "runtime": {"batch_size_cpu": 4, "batch_size_gpu": 32, "segment_seconds": 1500},
   "analysis": {"n_bootstrap": 2000, "min_denominator": 0.05}

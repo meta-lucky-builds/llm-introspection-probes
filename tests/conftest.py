@@ -121,7 +121,6 @@ def tiny_config_dict(data_dir: Path) -> dict[str, Any]:
         "seed": 7,
         "model": {"name": "tiny", "revision": "none"},
         "data_dir": str(data_dir),
-        "concept_prompt_mode": "chat",
         "design": {
             "n_concepts_calibration": 2,
             "n_clusters_calibration": 1,

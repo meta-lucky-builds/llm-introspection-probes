@@ -8,6 +8,7 @@ bias the experiment toward finding capture.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -150,6 +151,32 @@ def find_word_token(
     if decoded != word:
         raise TokenLocationError(f"Token for {word!r} decodes to {decoded!r}")
     return index
+
+
+def token_hash(input_ids: Sequence[int]) -> str:
+    """Short hash of a token sequence, stored on rows so clean and injected pairing can be checked."""
+    return hashlib.sha256(",".join(str(token) for token in input_ids).encode("ascii")).hexdigest()[:16]
+
+
+def locate_user_content_end(tokenizer: Any, rendered: str, content: str) -> tuple[list[int], int]:
+    """Return (input_ids, index of the token ending the user's message) for a chat rendering.
+
+    The chat tail after this token differs between model families, so concept vectors are read here
+    for every word, concept and baseline alike. Raises unless that token is exactly the message's
+    last character, which is "." for the concept prompt.
+    """
+    if rendered.count(content) != 1:
+        raise TokenLocationError("The user message must occur exactly once in the rendered prompt")
+    end = rendered.index(content) + len(content)
+    input_ids, offsets = encode_with_offsets(tokenizer, rendered)
+    hits = [i for i, (a, b) in enumerate(offsets) if b > a and a <= end - 1 < b]
+    if len(hits) != 1:
+        raise TokenLocationError(f"The end of the user message spans {len(hits)} tokens")
+    index = hits[0]
+    decoded = decode_token(tokenizer, input_ids[index])
+    if offsets[index][1] != end or decoded != content[-1]:
+        raise TokenLocationError(f"Expected a token {content[-1]!r} ending the message, got {decoded!r}")
+    return input_ids, index
 
 
 def word_char_spans(rendered: str, words: Sequence[str]) -> list[tuple[int, int]]:

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from mechinterp.design import plan_cells
 from mechinterp.stats import (
+    approx_percentile_coverage,
     bootstrap_p_two_sided,
     holm_adjust,
     percentile_ci,
@@ -12,38 +17,76 @@ from mechinterp.stats import (
     weighted_cell_mean,
 )
 
-N_CONCEPTS = 20
-N_CLUSTERS = 20
 TRUE_MEAN = 1.0
 
+# The small tier's test design, read from its config so this test follows the shipped numbers.
+_SMALL_DESIGN = json.loads(
+    (
+        Path(__file__).resolve().parents[1] / "experiments" / "e1_localization_capture" / "configs" / "small.json"
+    ).read_text(encoding="utf-8")
+)["design"]
+N_CONCEPTS = _SMALL_DESIGN["n_concepts_test"]
+N_CLUSTERS = _SMALL_DESIGN["n_clusters_test"]
 
-def _simulated_table(rng: np.random.Generator) -> np.ndarray:
-    concept_effects = rng.normal(0, 0.5, N_CONCEPTS)
-    cluster_effects = rng.normal(0, 0.5, N_CLUSTERS)
-    noise = rng.normal(0, 0.5, (N_CONCEPTS, N_CLUSTERS))
-    return TRUE_MEAN + concept_effects[:, None] + cluster_effects[None, :] + noise
+
+def _shipped_counts() -> np.ndarray:
+    counts = np.zeros((N_CONCEPTS, N_CLUSTERS))
+    cells = plan_cells(
+        N_CONCEPTS, N_CLUSTERS, _SMALL_DESIGN["positions_per_cell_test"], _SMALL_DESIGN["clusters_per_concept_test"]
+    )
+    for concept, cluster, positions in cells:
+        counts[concept, cluster] = len(positions)
+    return counts
 
 
-def _coverage(two_way: bool, n_simulations: int = 250, n_boot: int = 400) -> float:
+def _coverage(
+    concept_sd: float,
+    cluster_sd: float,
+    noise_sd: float,
+    two_way: bool = True,
+    n_simulations: int = 300,
+    n_boot: int = 400,
+) -> float:
     rng = np.random.default_rng(11)
-    counts = np.ones((N_CONCEPTS, N_CLUSTERS))
+    counts = _shipped_counts()
     covered = 0
     for _ in range(n_simulations):
-        table = _simulated_table(rng)
+        concept_effects = rng.normal(0, concept_sd, N_CONCEPTS)
+        cluster_effects = rng.normal(0, cluster_sd, N_CLUSTERS)
+        noise = rng.normal(0, noise_sd, (N_CONCEPTS, N_CLUSTERS))
+        means = TRUE_MEAN + concept_effects[:, None] + cluster_effects[None, :] + noise
         concept_weights, cluster_weights = two_way_weights(N_CONCEPTS, N_CLUSTERS, n_boot, rng)
         if not two_way:
             cluster_weights = np.ones_like(cluster_weights)
-        low, high = percentile_ci(weighted_cell_mean(table, counts, concept_weights, cluster_weights))
+        low, high = percentile_ci(weighted_cell_mean(means * counts, counts, concept_weights, cluster_weights))
         covered += int(low <= TRUE_MEAN <= high)
     return covered / n_simulations
 
 
-def test_two_way_bootstrap_covers_the_true_mean() -> None:
-    assert 0.85 <= _coverage(two_way=True) <= 1.0
+def test_coverage_at_the_shipped_small_design() -> None:
+    """Below nominal, as the analysis caveat says, but not badly so at this size."""
+    assert 0.85 <= _coverage(0.3, 0.3, 0.3) <= 0.98
+
+
+def test_coverage_at_the_shipped_design_when_clusters_dominate() -> None:
+    assert 0.85 <= _coverage(0.0, 1.0, 0.1) <= 0.98
 
 
 def test_resampling_only_concepts_undercovers_when_clusters_vary() -> None:
-    assert _coverage(two_way=False) < _coverage(two_way=True) - 0.05
+    assert _coverage(0.3, 0.3, 0.3, two_way=False) < _coverage(0.3, 0.3, 0.3) - 0.05
+
+
+def test_shipped_small_design_has_ten_clusters_and_a_trial_in_every_row_and_column() -> None:
+    counts = _shipped_counts()
+    assert N_CLUSTERS >= 10
+    assert (counts.sum(axis=0) > 0).all() and (counts.sum(axis=1) > 0).all()
+
+
+def test_approximate_coverage_matches_the_t_arithmetic() -> None:
+    # 1.96 * sqrt(4/5) = 1.75 on t with 4 df, and 1.96 * sqrt(9/10) = 1.86 on t with 9 df.
+    assert approx_percentile_coverage(5) == pytest.approx(0.845, abs=0.01)
+    assert approx_percentile_coverage(10) == pytest.approx(0.905, abs=0.01)
+    assert approx_percentile_coverage(1) is None
 
 
 def test_weights_resample_each_dimension_with_replacement() -> None:

@@ -12,7 +12,8 @@ The E1 code is written. **Nothing has been run yet, including the tests**, becau
 
 | Path | Contents |
 |---|---|
-| `src/mechinterp/modeling.py` | Loading, layer discovery, last-token forward pass |
+| `src/mechinterp/identity.py` | Run identity and code hash |
+| `src/mechinterp/modeling.py` | Loading by pinned commit, layer discovery, last-token forward pass |
 | `src/mechinterp/hooks.py` | `h <- h + alpha * \|\|h\|\| * v` at per-example positions; capture |
 | `src/mechinterp/vectors.py` | Concept vectors, seeded random directions |
 | `src/mechinterp/prompts.py` | Task text, chat rendering, token location, answer tokens |
@@ -81,7 +82,9 @@ restore_checkpoint("""PASTE BLOB""", "/content/e1_small/results.jsonl")
 
 ### Order of runs
 
-Run `pilot.json` first. Pilot data check the pipeline and timing only, and the analysis refuses to draw conclusions from them. Then run `small.json`. The small tier uses about 740 prompts, sized for at most about 3 hours at 12 to 14 seconds per prompt on a 1.7B model. Trust the dry run over this figure.
+Run `pilot.json` first. Pilot data check the pipeline and timing only, and the analysis refuses to draw conclusions from them. The pilot uses its own concepts and clusters, so it reveals nothing about the test split. Then run `small.json`. The small tier uses up to about 1,080 prompts (10 concepts, 10 clusters, 2 positions per cell), which is about 3 hours at 10 seconds per prompt or 3.6 hours at 12. These rates are unmeasured, so trust the dry run.
+
+A results directory holds one run identity: code, config, data, model commit, dtype, device type and library versions. Resuming with any of these changed is refused, so a new bundle needs a new output directory.
 
 ## Run on GPU
 
@@ -94,7 +97,7 @@ python -m mechinterp.cli analyze --out results/large_qwen3_4b
 
 `run` stops after `runtime.segment_seconds`, or `--max-seconds`, so repeat it until `complete` is true. `large_llama31_8b.json` and `large_gemma3_12b.json` use gated models and need `HF_TOKEN` in the environment. Never put a token in a config or in this repo.
 
-Dtype is chosen per device: float32 on CPU, bfloat16 on GPU where supported and float16 otherwise.
+All runs use float32, because bf16 quantizes logits enough to create ties that favour lower labels. Budget GPU memory for that: about 16 GB of weights for 4B, 32 GB for 8B and 48 GB for 12B.
 
 ## Tests
 
@@ -113,7 +116,11 @@ These are the places where the prereg left room. Each is implemented in one plac
 - **No padding** (`runner.py`): prompts are batched by exact token length, so the last real token is always index -1.
 - **Answer tokens** (`prompts.py`): resolved by tokenizing prompt plus answer in context. Prompts end at the generation prompt, so digits take no leading space.
 - **`none`** (`prompts.py`): the lowercase token only. If it is not one token, `T_inj_none` is dropped and that is recorded. `label_mass` shows when the model prefers another spelling.
-- **Positions per cell** (`design.py`): pilot and small tiers run fewer than ten positions per (concept, cluster) cell, balanced so all ten occur equally within each cluster. The large tier runs all ten.
+- **Positions per cell** (`design.py`): the pilot runs 5 and the small tier 2 positions per cell. The large tier runs all ten. On inference tiers all ten occur equally within each cluster and within each concept, and planning raises otherwise.
+- **Sparse small tier** (`design.py`): each of 10 concepts meets 5 of 10 clusters, cyclically. That costs the same trials as 5 x 10 crossed but doubles the concepts. The report states the expected undercoverage.
+- **Concept vector read site** (`vectors.py`): the "." ending "Tell me about {c}." inside the chat rendering, for concepts and baseline words alike, asserted token by token.
+- **H3** (`analysis.py`): "uninformative" unless impact matching met its stated tolerance.
+- **Label mass** (`analysis.py`): reported per task and condition. Descriptive only.
 - **Random directions** (`runner.py`): the two random conditions share one direction per concept, so H3 compares scale alone.
 - **Holm** (`analysis.py`): bounds must clear zero and also survive Holm across the three control tasks.
 - **Ratio** (`stats.py`): replicates with `L_inj` at or below `min_denominator` (0.05 logits) have an undefined share and count against both bounds.

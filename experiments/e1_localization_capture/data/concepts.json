@@ -19,5 +19,7 @@
     "evolution", "lions", "tradition", "windmills", "fear", "rockets", "painting", "vikings",
     "curiosity", "glass", "dolphins", "revolution", "chocolate", "silence", "lighthouses",
     "medicine", "wolves", "laughter", "empires"
-  ]
+  ],
+  "pilot_calibration": ["shipwrecks", "tapestries", "cartography", "migration"],
+  "pilot_test": ["beekeeping", "folklore", "typewriters", "geysers"]
 }

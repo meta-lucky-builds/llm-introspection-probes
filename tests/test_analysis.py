@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 import pytest
 
-from mechinterp.analysis import _rule_verdict, analyze
+from mechinterp.analysis import MixedRunError, _rule_verdict, analyze
 from mechinterp.export import CELL_COLUMNS, CLEAN_COLUMNS, build_export, decode_export, encode_export
+from mechinterp.stats import NonFiniteError
 
 N_CONCEPTS = 12
 N_CLUSTERS = 8
@@ -57,6 +58,7 @@ def synthetic_export(
                         rng.binomial(N_PER_CELL, 0.1) / N_PER_CELL,
                         0.8 if task == "T_fact" else None,
                         0.95,
+                        None,
                     ]
                 )
     return {
@@ -76,7 +78,13 @@ def synthetic_export(
         "position_counts": {},
         "cell_columns": CELL_COLUMNS,
         "cells": rows,
-        "impact_match": {"match_ok": match_ok, "target_js": 0.1, "achieved_js": 0.1},
+        "impact_match": {
+            "match_ok": match_ok,
+            "target_js": 0.1,
+            "achieved_js": 0.1 if match_ok else 0.05,
+            "relative_error": 0.0 if match_ok else 0.5,
+            "tolerance": 0.1,
+        },
     }
 
 
@@ -151,10 +159,23 @@ def _control(share: dict[str, float | None]) -> dict[str, Any]:
     return {"L": good, "L_inj_minus_L": good, "share": share, "L_holm_p": 0.003, "gap_holm_p": 0.003}
 
 
-def test_undefined_share_bounds_give_mixed_never_capture_or_gated() -> None:
+def test_both_share_bounds_undefined_gives_mixed() -> None:
     assert _rule_verdict(_control({"lo": None, "hi": None})) == "mixed"
+
+
+def test_an_undefined_share_bound_blocks_only_the_claim_that_reads_it() -> None:
+    # Capture reads the lower bound and task-gated reads the upper. ratio_summary voids both at
+    # nearly the same point, so these one-sided cases are almost unreachable in practice.
     assert _rule_verdict(_control({"lo": None, "hi": 0.1})) == "task_gated"
     assert _rule_verdict(_control({"lo": 0.6, "hi": None})) == "capture"
+
+
+def test_undefined_share_from_real_replicates_cannot_reach_capture_or_gated() -> None:
+    export = synthetic_export({("T_inj", "concept"): 0.03, ("T_pick", "concept"): 0.02})
+    report = analyze(export)
+    share = report["estimates"]["controls"]["T_pick"]["share"]
+    assert share["lo"] is None and share["hi"] is None
+    assert _rule_verdict(report["estimates"]["controls"]["T_pick"]) == "mixed"
 
 
 def test_holm_can_veto_a_bound() -> None:
@@ -177,19 +198,106 @@ def test_h2_is_independent_of_h1() -> None:
 
 def test_h3_supported_and_gap_reported() -> None:
     report = analyze(synthetic_export())
+    assert report["verdicts"]["H3"]["verdict"] == "supported"
     assert report["verdicts"]["H3"]["supported"] is True
+    assert report["verdicts"]["H3"]["tolerance"] == 0.1
     assert report["estimates"]["h3"]["concept_minus_impact"]["point"] == pytest.approx(2.0, abs=0.1)
 
 
 def test_h3_not_supported_when_impact_does_not_exceed_norm() -> None:
     report = analyze(synthetic_export({("T_inj", "random_impact"): 0.3}))
+    assert report["verdicts"]["H3"]["verdict"] == "not_supported"
     assert report["verdicts"]["H3"]["supported"] is False
 
 
-def test_failed_impact_match_is_visible() -> None:
+def test_failed_impact_match_makes_h3_uninformative_even_with_a_large_gap() -> None:
     report = analyze(synthetic_export(match_ok=False))
-    assert report["verdicts"]["H3"]["match_ok"] is False
-    assert any("impact match" in warning for warning in report["warnings"])
+    h3 = report["verdicts"]["H3"]
+    assert report["estimates"]["h3"]["impact_minus_norm"]["lo"] > 0
+    assert h3["verdict"] == "uninformative" and h3["supported"] is False
+    assert h3["match_ok"] is False and h3["relative_error"] == 0.5 and h3["tolerance"] == 0.1
+    assert any("uninformative" in warning for warning in report["warnings"])
+
+
+def test_missing_impact_match_makes_h3_uninformative() -> None:
+    export = synthetic_export()
+    export["impact_match"] = None
+    assert analyze(export)["verdicts"]["H3"]["verdict"] == "uninformative"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+@pytest.mark.parametrize("column", ["L", "hit", "clean_hit", "label_mass"])
+def test_non_finite_cell_raises_rather_than_giving_a_verdict(bad, column) -> None:
+    export = synthetic_export()
+    export["cells"][7][CELL_COLUMNS.index(column)] = bad
+    with pytest.raises(NonFiniteError):
+        analyze(export)
+
+
+def test_non_finite_clean_row_raises() -> None:
+    export = synthetic_export()
+    export["clean"] = [["T_pick", "k0", 1, float("nan"), None, None, None]]
+    with pytest.raises(NonFiniteError):
+        analyze(export)
+
+
+def test_mixed_identities_are_refused() -> None:
+    export = synthetic_export()
+    export["meta"]["environments"] = [{"code_hash": "a"}, {"code_hash": "b"}]
+    with pytest.raises(MixedRunError, match="code_hash"):
+        analyze(export)
+
+
+def test_build_export_reports_every_distinct_identity() -> None:
+    records = [
+        {"key": "manifest|0", "kind": "manifest", "identity": {"code_hash": "a"}},
+        {"key": "manifest|1", "kind": "manifest", "identity": {"code_hash": "a"}},
+        {"key": "manifest|2", "kind": "manifest", "identity": {"code_hash": "b"}},
+    ]
+    assert build_export(records)["meta"]["environments"] == [{"code_hash": "a"}, {"code_hash": "b"}]
+
+
+def test_injected_label_mass_is_reported_and_does_not_change_the_verdict() -> None:
+    export = synthetic_export()
+    baseline = analyze(export)
+    assert baseline["label_mass"]["injected"]["T_pick|concept"]["point"] == pytest.approx(0.95)
+    assert not any("injected label mass" in warning for warning in baseline["warnings"])
+    mass_column = CELL_COLUMNS.index("label_mass")
+    for row in export["cells"]:
+        if row[0] == "T_pick":
+            row[mass_column] = 0.2
+    report = analyze(export)
+    assert report["label_mass"]["injected"]["T_pick|concept"]["point"] == pytest.approx(0.2)
+    assert any("injected label mass" in warning and "T_pick" in warning for warning in report["warnings"])
+    assert report["outcome"] == baseline["outcome"]
+
+
+def test_injected_label_mass_is_reported_when_a_gate_fails() -> None:
+    assert "T_inj|concept" in analyze(synthetic_export(fact_accuracy=0.5))["label_mass"]["injected"]
+    assert "T_inj|concept" in analyze(synthetic_export(NO_EFFECT))["label_mass"]["injected"]
+
+
+def test_small_sample_caveat_is_in_the_output() -> None:
+    report = analyze(synthetic_export())
+    caveat = report["small_sample_caveat"]
+    assert caveat["n_concepts"] == N_CONCEPTS and caveat["n_clusters"] == N_CLUSTERS
+    assert caveat["approx_coverage_if_cluster_variance_dominates"] < 0.93
+    assert any("undercover" in warning for warning in report["warnings"])
+
+
+def test_a_sparse_design_with_missing_cells_gives_finite_estimates() -> None:
+    export = synthetic_export()
+    concept_column = CELL_COLUMNS.index("concept")
+    cluster_column = CELL_COLUMNS.index("cluster")
+    concepts = [f"c{i}" for i in range(N_CONCEPTS)]
+    clusters = [f"k{i}" for i in range(N_CLUSTERS)]
+    export["cells"] = [
+        row
+        for row in export["cells"]
+        if (clusters.index(row[cluster_column]) - concepts.index(row[concept_column])) % N_CLUSTERS < 4
+    ]
+    report = analyze(export)
+    assert report["outcome"] == "capture"
 
 
 def test_incomplete_run_gets_no_decision() -> None:

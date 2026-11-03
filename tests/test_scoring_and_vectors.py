@@ -6,9 +6,18 @@ import pytest
 import torch
 from conftest import BASELINE, CONCEPTS
 
-from mechinterp.modeling import get_layers
-from mechinterp.scoring import answer_mass, js_divergence, localization_effect, margin
-from mechinterp.vectors import concept_vectors, final_token_residuals, random_unit_vector
+from mechinterp.hooks import capture_layer_outputs
+from mechinterp.modeling import forward_last_logits, get_layers
+from mechinterp.prompts import concept_prompt_text, decode_token, locate_user_content_end, render_chat
+from mechinterp.scoring import answer_mass, assert_finite, js_divergence, localization_effect, margin
+from mechinterp.stats import NonFiniteError
+from mechinterp.vectors import (
+    concept_vectors,
+    fingerprints_match,
+    random_unit_vector,
+    user_end_residuals,
+    vector_fingerprint,
+)
 
 
 def test_margin_matches_the_definition() -> None:
@@ -48,6 +57,15 @@ def test_js_properties() -> None:
     assert torch.isfinite(js_divergence(torch.tensor([1e4, -1e4, 0.0]), torch.tensor([-1e4, 1e4, 0.0])))
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_logits_raise(bad) -> None:
+    logits = torch.zeros(2, 4)
+    assert_finite(logits, "fine")
+    logits[1, 2] = bad
+    with pytest.raises(NonFiniteError):
+        assert_finite(logits, "broken")
+
+
 def test_answer_mass() -> None:
     logits = torch.zeros(1, 4)
     assert answer_mass(logits, [0, 1]).item() == pytest.approx(0.5)
@@ -64,20 +82,49 @@ def test_random_vectors_are_seeded_unit_and_independent() -> None:
 def test_concept_vectors_are_unit_per_layer_and_differ(model, tokenizer) -> None:
     layers = dict(enumerate(get_layers(model)))
     device = torch.device("cpu")
-    vectors, norms = concept_vectors(model, tokenizer, layers, CONCEPTS["calibration"], BASELINE, 8, device)
+    vectors, diagnostics = concept_vectors(model, tokenizer, layers, CONCEPTS["calibration"], BASELINE, 8, device)
     first, second = CONCEPTS["calibration"][:2]
     for index in layers:
         assert vectors[first][index].norm().item() == pytest.approx(1.0, abs=1e-5)
         assert vectors[first][index].shape == (32,)
         assert not torch.equal(vectors[first][index], vectors[second][index])
-        assert norms[str(index)] > 0
+        layer_diagnostics = diagnostics[str(index)]
+        assert layer_diagnostics["mean_raw_norm"] > 0
+        assert layer_diagnostics["mean_raw_norm_over_activation_norm"] > 0
+        assert -1.0 <= layer_diagnostics["mean_pairwise_cosine"] <= 1.0
 
 
 def test_residuals_do_not_depend_on_batching(model, tokenizer) -> None:
     layers = {0: get_layers(model)[0]}
     device = torch.device("cpu")
     words = CONCEPTS["test"]
-    together = final_token_residuals(model, tokenizer, layers, words, 8, device)
-    alone = final_token_residuals(model, tokenizer, layers, words, 1, device)
+    together = user_end_residuals(model, tokenizer, layers, words, 8, device)
+    alone = user_end_residuals(model, tokenizer, layers, words, 1, device)
     for word in words:
         assert torch.allclose(together[word][0], alone[word][0], atol=1e-4)
+
+
+def test_residual_is_read_at_the_period_not_at_the_chat_tail(model, tokenizer) -> None:
+    layer_index = 1
+    layers = {layer_index: get_layers(model)[layer_index]}
+    word = CONCEPTS["test"][0]
+    text = concept_prompt_text(word)
+    ids, read_index = locate_user_content_end(tokenizer, render_chat(tokenizer, text), text)
+    assert decode_token(tokenizer, ids[read_index]) == "."
+    assert read_index < len(ids) - 1
+    input_ids = torch.tensor([ids])
+    with torch.inference_mode(), capture_layer_outputs(layers) as captured:
+        forward_last_logits(model, input_ids)
+    residual = user_end_residuals(model, tokenizer, layers, [word], 4, torch.device("cpu"))[word][layer_index]
+    assert torch.allclose(residual, captured[layer_index][0, read_index], atol=1e-5)
+    assert not torch.allclose(residual, captured[layer_index][0, -1], atol=1e-5)
+
+
+def test_fingerprint_tolerates_float_noise_but_not_a_different_vector() -> None:
+    vector = random_unit_vector(32, 1, "a")
+    fingerprint = vector_fingerprint({"a": {0: vector}}, 1)
+    noisy = vector_fingerprint({"a": {0: vector + 1e-6}}, 1)
+    other = vector_fingerprint({"a": {0: random_unit_vector(32, 1, "b")}}, 1)
+    assert fingerprints_match(fingerprint, noisy)
+    assert not fingerprints_match(fingerprint, other)
+    assert not fingerprints_match(fingerprint, {})

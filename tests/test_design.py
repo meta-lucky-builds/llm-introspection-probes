@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -15,11 +16,14 @@ from mechinterp.design import (
     PHASE_SCREEN,
     PHASE_TEST,
     Trial,
+    assert_pilot_isolated,
+    assert_positions_balanced_within_concepts,
     assert_splits_disjoint,
     assert_trial_respects_split,
     cell_positions,
     fact_query,
     load_data,
+    plan_cells,
     plan_clean_keys,
     plan_grid_trials,
     plan_prompt_counts,
@@ -55,6 +59,49 @@ def test_all_positions_are_balanced_within_clusters() -> None:
 
 def test_full_cell_covers_all_ten_positions() -> None:
     assert sorted(cell_positions(3, 2, 5, 10)) == list(range(10))
+
+
+def _position_counts(cells) -> tuple[dict[int, Counter], dict[int, Counter]]:
+    by_concept: dict[int, Counter] = {}
+    by_cluster: dict[int, Counter] = {}
+    for concept, cluster, positions in cells:
+        by_concept.setdefault(concept, Counter()).update(positions)
+        by_cluster.setdefault(cluster, Counter()).update(positions)
+    return by_concept, by_cluster
+
+
+def test_cyclic_design_balances_positions_within_concepts_and_clusters() -> None:
+    cells = plan_cells(10, 10, 2, 5)
+    assert len(cells) == 50
+    assert len({(concept, cluster) for concept, cluster, _ in cells}) == 50
+    by_concept, by_cluster = _position_counts(cells)
+    assert len(by_concept) == 10 and len(by_cluster) == 10
+    for counter in [*by_concept.values(), *by_cluster.values()]:
+        assert sorted(counter) == list(range(10)) and set(counter.values()) == {1}
+    for _, _, positions in cells:
+        assert {position % 2 for position in positions} == {0, 1}
+
+
+def test_the_review_design_with_one_parity_per_concept_is_rejected() -> None:
+    """10 concepts, 5 clusters and 1 position per cell balances clusters but not concepts."""
+    cells = plan_cells(10, 5, 1)
+    by_concept, _ = _position_counts(cells)
+    assert {position % 2 for position in by_concept[0]} == {0}
+    trials = [
+        Trial(PHASE_TEST, "T_inj", "concept", f"c{concept}", f"k{cluster}", position, None, 0, 1.0)
+        for concept, cluster, positions in cells
+        for position in positions
+    ]
+    with pytest.raises(ValueError):
+        assert_positions_balanced_within_concepts(trials)
+
+
+def test_inference_tier_plans_refuse_a_design_unbalanced_within_concepts(tiny) -> None:
+    config, _, stimuli = tiny
+    one_cluster = dict(list(stimuli.clusters_test.items())[:1])
+    narrow = replace(stimuli, clusters_test=one_cluster)
+    with pytest.raises(ValueError):
+        plan_test_trials(narrow, config, 0, 1.0, 2.0)
 
 
 def test_fact_query_is_never_the_injected_position_and_is_balanced() -> None:
@@ -208,11 +255,38 @@ def test_shipped_configs_plan_balanced_designs(path) -> None:
         by_condition.setdefault((trial.task, trial.condition), Counter())[trial.position] += 1
     for counter in by_condition.values():
         assert len(counter) == 10 and len(set(counter.values())) == 1
+    if config.inference_allowed:
+        assert_positions_balanced_within_concepts(trials)
+
+
+@pytest.mark.parametrize("path", CONFIG_PATHS, ids=lambda path: path.stem)
+def test_shipped_configs_pin_a_full_commit(path) -> None:
+    assert re.fullmatch(r"[0-9a-f]{40}", Config.from_file(path).model_revision)
+
+
+def test_small_tier_design() -> None:
+    config = Config.from_file(EXPERIMENT / "configs" / "small.json")
+    stimuli = prepare_stimuli(load_data(config.data_dir), config, lambda word: True)
+    assert config.design.positions_per_cell_test == 2
+    assert len(stimuli.clusters_test) >= 10
+    assert plan_prompt_counts(stimuli, config) == {
+        "vector_prompts": 65,
+        "clean_calibration": 2,
+        "calibration_grid": 120,
+        "impact_search_max": 120,
+        "screen": 0,
+        "clean_test": 140,
+        "test": 700,
+    }
+    trials = plan_test_trials(stimuli, config, 0, 1.0, 2.0)
+    for concept in stimuli.concepts_test:
+        seen = {trial.position for trial in trials if trial.concept == concept and trial.task == "T_inj"}
+        assert seen == set(range(10))
 
 
 def test_tier_sizes_fit_their_time_budgets() -> None:
-    """At roughly 6 s per prompt for 0.6B and 12 s per prompt for 1.7B on 2 vCPUs."""
-    expected_ceiling = {"pilot": 200, "small": 800}
+    """Unmeasured estimates: about 6 s per prompt for 0.6B and 10 to 12 s per prompt for 1.7B on 2 vCPUs."""
+    expected_ceiling = {"pilot": 200, "small": 1100}
     for name, ceiling in expected_ceiling.items():
         config = Config.from_file(EXPERIMENT / "configs" / f"{name}.json")
         stimuli = prepare_stimuli(load_data(config.data_dir), config, lambda word: True)
@@ -220,5 +294,33 @@ def test_tier_sizes_fit_their_time_budgets() -> None:
         assert sum(counts.values()) - counts["vector_prompts"] <= ceiling, (name, counts)
 
 
-def test_pilot_is_excluded_from_inference() -> None:
-    assert Config.from_file(EXPERIMENT / "configs" / "pilot.json").inference_allowed is False
+def test_pilot_is_excluded_from_inference_and_uses_its_own_stimuli() -> None:
+    config = Config.from_file(EXPERIMENT / "configs" / "pilot.json")
+    assert config.inference_allowed is False and config.data_pool == "pilot"
+    raw = load_data(config.data_dir)
+    stimuli = prepare_stimuli(raw, config, lambda word: True)
+    assert_pilot_isolated(raw, stimuli)
+    assert not {*stimuli.concepts_calibration, *stimuli.concepts_test} & {*raw.concepts_calibration, *raw.concepts_test}
+    assert not set(stimuli.all_clusters) & {*raw.clusters_calibration, *raw.clusters_test}
+    plan_test_trials(stimuli, config, 0, 1.0, 2.0)
+
+
+def test_overlap_between_pilot_and_real_stimuli_raises() -> None:
+    config = Config.from_file(EXPERIMENT / "configs" / "pilot.json")
+    raw = load_data(config.data_dir)
+    stimuli = prepare_stimuli(raw, config, lambda word: True)
+    with pytest.raises(AssertionError):
+        assert_pilot_isolated(raw, replace(stimuli, concepts_test=(raw.concepts_test[0],)))
+    test_cluster = next(iter(raw.clusters_test))
+    with pytest.raises(AssertionError):
+        assert_pilot_isolated(raw, replace(stimuli, clusters_test={test_cluster: raw.clusters_test[test_cluster]}))
+    with pytest.raises(ValueError):
+        validate_data(replace(raw, pilot_concepts_test=(raw.concepts_test[0],)))
+
+
+def test_pool_must_match_inference_status(tmp_path) -> None:
+    raw = tiny_config_dict(write_tiny_data(tmp_path / "data"))
+    with pytest.raises(ValueError):
+        Config.from_dict({**raw, "inference_allowed": False}, tmp_path)
+    with pytest.raises(ValueError):
+        Config.from_dict({**raw, "data_pool": "pilot"}, tmp_path)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any
 
 import torch
 from torch import nn
+
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 # Checked in order. Later entries cover multimodal wrappers such as Gemma 3, whose
 # text layers moved between transformers versions.
@@ -28,21 +31,39 @@ def choose_device() -> torch.device:
 
 
 def choose_dtype(device: torch.device) -> torch.dtype:
-    if device.type == "cuda":
-        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    """float32 on every device.
+
+    bf16 logits between 16 and 32 have a step of 0.125, so exact ties become common and argmax then
+    favours the lower label. float16 can overflow at high alpha. The cost is GPU memory.
+    """
     return torch.float32
 
 
-def load_model_and_tokenizer(name: str, revision: str, device: torch.device) -> tuple[nn.Module, Any]:
+def resolve_model_commit(name: str, revision: str) -> str:
+    """Return the full commit for a revision. A pinned commit needs no network."""
+    if COMMIT_PATTERN.fullmatch(revision):
+        return revision
+    from huggingface_hub import HfApi
+
+    commit = HfApi().model_info(name, revision=revision).sha
+    if not commit:
+        raise ValueError(f"Could not resolve {name}@{revision} to a commit")
+    return commit
+
+
+def load_model_and_tokenizer(name: str, commit: str, device: torch.device) -> tuple[nn.Module, Any]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision)
+    tokenizer = AutoTokenizer.from_pretrained(name, revision=commit)
     dtype = choose_dtype(device)
     try:
-        model = AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=dtype)
+        model = AutoModelForCausalLM.from_pretrained(name, revision=commit, dtype=dtype)
     except TypeError:
         # Older transformers spell this argument torch_dtype.
-        model = AutoModelForCausalLM.from_pretrained(name, revision=revision, torch_dtype=dtype)
+        model = AutoModelForCausalLM.from_pretrained(name, revision=commit, torch_dtype=dtype)
+    loaded_commit = getattr(model.config, "_commit_hash", None)
+    if loaded_commit and loaded_commit != commit:
+        raise ValueError(f"Asked for {name}@{commit} but loaded {loaded_commit}")
     model.to(device)
     model.eval()
     model.requires_grad_(False)

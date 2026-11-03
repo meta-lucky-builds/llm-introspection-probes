@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -27,6 +28,11 @@ class RawData:
     clusters_calibration: dict[str, tuple[str, ...]]
     clusters_test: dict[str, tuple[str, ...]]
     sha256: str
+    # The pilot has its own stimuli, so nobody sees test-split estimates before the real run.
+    pilot_concepts_calibration: tuple[str, ...] = ()
+    pilot_concepts_test: tuple[str, ...] = ()
+    pilot_clusters_calibration: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    pilot_clusters_test: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,12 @@ def load_data(data_dir: str | Path) -> RawData:
         clusters_calibration={name: tuple(words) for name, words in clusters["calibration"].items()},
         clusters_test={name: tuple(words) for name, words in clusters["test"].items()},
         sha256=digest,
+        pilot_concepts_calibration=tuple(concepts.get("pilot_calibration", ())),
+        pilot_concepts_test=tuple(concepts.get("pilot_test", ())),
+        pilot_clusters_calibration={
+            name: tuple(words) for name, words in clusters.get("pilot_calibration", {}).items()
+        },
+        pilot_clusters_test={name: tuple(words) for name, words in clusters.get("pilot_test", {}).items()},
     )
     validate_data(raw)
     return raw
@@ -109,11 +121,21 @@ def validate_data(raw: RawData) -> None:
         raise ValueError(f"The prereg needs {N_BASELINE_WORDS} distinct baseline words")
     _assert_disjoint(raw.concepts_calibration, raw.concepts_test, "Calibration and test concepts")
     _assert_disjoint(raw.clusters_calibration, raw.clusters_test, "Calibration and test cluster names")
-    bank = [word for words in raw.clusters_calibration.values() for word in words]
-    bank += [word for words in raw.clusters_test.values() for word in words]
+    all_clusters = [
+        raw.clusters_calibration,
+        raw.clusters_test,
+        raw.pilot_clusters_calibration,
+        raw.pilot_clusters_test,
+    ]
+    names = [name for clusters in all_clusters for name in clusters]
+    if len(set(names)) != len(names):
+        raise ValueError("Cluster names must be unique across all pools")
+    bank = [word for clusters in all_clusters for words in clusters.values() for word in words]
     if len({word.lower() for word in bank}) != len(bank):
         raise ValueError("Candidate words must be unique across clusters")
-    concepts = raw.concepts_calibration + raw.concepts_test
+    concepts = (
+        raw.concepts_calibration + raw.concepts_test + raw.pilot_concepts_calibration + raw.pilot_concepts_test
+    )
     if len(set(concepts)) != len(concepts):
         raise ValueError("Concept words must be unique")
     _assert_disjoint(concepts, raw.baseline_words, "Concepts and baseline words")
@@ -127,6 +149,17 @@ def assert_splits_disjoint(stimuli: Stimuli) -> None:
     calibration_words = [word for words in stimuli.clusters_calibration.values() for word in words]
     test_words = [word for words in stimuli.clusters_test.values() for word in words]
     _assert_disjoint(calibration_words, test_words, "Calibration and test candidate words")
+
+
+def assert_pilot_isolated(raw: RawData, stimuli: Stimuli) -> None:
+    """A pilot's stimuli must share nothing with the calibration or test splits of the real run."""
+    main_concepts = {*raw.concepts_calibration, *raw.concepts_test}
+    main_clusters = {**raw.clusters_calibration, **raw.clusters_test}
+    main_words = {word for words in main_clusters.values() for word in words}
+    pilot_concepts = {*stimuli.concepts_calibration, *stimuli.concepts_test}
+    pilot_words = {word for words in stimuli.all_clusters.values() for word in words}
+    if pilot_concepts & main_concepts or set(stimuli.all_clusters) & set(main_clusters) or pilot_words & main_words:
+        raise AssertionError("Pilot stimuli overlap the calibration or test split")
 
 
 def _seeded_shuffle(items: Sequence[Any], seed: int, tag: str) -> list[Any]:
@@ -164,8 +197,13 @@ def _prepare_clusters(
 def prepare_stimuli(raw: RawData, config: Config, keep_word: Callable[[str], bool]) -> Stimuli:
     """Choose the tier's concepts and clusters, keeping only single-token candidate words."""
     design = config.design
-    concepts_calibration = _seeded_shuffle(raw.concepts_calibration, config.seed, "concepts:calibration")
-    concepts_test = _seeded_shuffle(raw.concepts_test, config.seed, "concepts:test")
+    use_pilot = config.data_pool == "pilot"
+    pool_concepts_calibration = raw.pilot_concepts_calibration if use_pilot else raw.concepts_calibration
+    pool_concepts_test = raw.pilot_concepts_test if use_pilot else raw.concepts_test
+    pool_clusters_calibration = raw.pilot_clusters_calibration if use_pilot else raw.clusters_calibration
+    pool_clusters_test = raw.pilot_clusters_test if use_pilot else raw.clusters_test
+    concepts_calibration = _seeded_shuffle(pool_concepts_calibration, config.seed, "concepts:calibration")
+    concepts_test = _seeded_shuffle(pool_concepts_test, config.seed, "concepts:test")
     if design.n_concepts_calibration > len(concepts_calibration) or design.n_concepts_test > len(concepts_test):
         raise ValueError("The config asks for more concepts than the data files hold")
     dropped_words: dict[str, list[str]] = {}
@@ -175,7 +213,7 @@ def prepare_stimuli(raw: RawData, config: Config, keep_word: Callable[[str], boo
         concepts_test=tuple(concepts_test[: design.n_concepts_test]),
         baseline_words=raw.baseline_words,
         clusters_calibration=_prepare_clusters(
-            raw.clusters_calibration,
+            pool_clusters_calibration,
             design.n_clusters_calibration,
             config.seed,
             keep_word,
@@ -184,7 +222,7 @@ def prepare_stimuli(raw: RawData, config: Config, keep_word: Callable[[str], boo
             "calibration",
         ),
         clusters_test=_prepare_clusters(
-            raw.clusters_test,
+            pool_clusters_test,
             design.n_clusters_test,
             config.seed,
             keep_word,
@@ -196,6 +234,8 @@ def prepare_stimuli(raw: RawData, config: Config, keep_word: Callable[[str], boo
         dropped_clusters=dropped_clusters,
     )
     assert_splits_disjoint(stimuli)
+    if use_pilot:
+        assert_pilot_isolated(raw, stimuli)
     return stimuli
 
 
@@ -210,21 +250,65 @@ def cell_positions(concept_index: int, cluster_index: int, n_clusters: int, per_
     return [(start + step) % LIST_SIZE for step in range(per_cell)]
 
 
-def _iter_cells(
-    concepts: Sequence[str], clusters: Sequence[str], per_cell: int
-) -> Iterator[tuple[str, int, str, int]]:
-    """Yield (concept, cluster_index, cluster, position) for a design balanced within clusters."""
+def plan_cells(
+    n_concepts: int, n_clusters: int, per_cell: int, clusters_per_concept: int | None = None
+) -> list[tuple[int, int, list[int]]]:
+    """Return (concept_index, cluster_index, positions) for each cell, balanced within clusters.
+
+    With clusters_per_concept set, concept c meets clusters c, c+1, ... (mod n_clusters). That spends
+    the trials of a smaller crossed table on more concepts and more clusters at once, and the cyclic
+    pairing keeps all concepts and clusters connected. At step s the cell takes positions from s *
+    per_cell, so each concept and each cluster covers all ten positions when s * per_cell reaches ten.
+    """
     if not 1 <= per_cell <= LIST_SIZE:
         raise ValueError(f"positions per cell must be between 1 and {LIST_SIZE}")
-    if (len(concepts) * per_cell) % LIST_SIZE != 0:
-        raise ValueError(
-            f"{len(concepts)} concepts with {per_cell} positions per cell cannot balance "
-            f"{LIST_SIZE} positions within a cluster"
-        )
-    for concept_index, concept in enumerate(concepts):
-        for cluster_index, cluster in enumerate(clusters):
-            for position in cell_positions(concept_index, cluster_index, len(clusters), per_cell):
-                yield concept, cluster_index, cluster, position
+    cells: list[tuple[int, int, list[int]]] = []
+    for concept in range(n_concepts):
+        if clusters_per_concept is None:
+            for cluster in range(n_clusters):
+                cells.append((concept, cluster, cell_positions(concept, cluster, n_clusters, per_cell)))
+        else:
+            if not 1 <= clusters_per_concept <= n_clusters:
+                raise ValueError("clusters_per_concept must be between 1 and the number of clusters")
+            for step in range(clusters_per_concept):
+                start = step * per_cell
+                positions = [(start + offset) % LIST_SIZE for offset in range(per_cell)]
+                cells.append((concept, (concept + step) % n_clusters, positions))
+    per_cluster: dict[int, Counter] = {cluster: Counter() for cluster in range(n_clusters)}
+    for _, cluster, positions in cells:
+        per_cluster[cluster].update(positions)
+    for cluster, counts in per_cluster.items():
+        if len(counts) != LIST_SIZE or len(set(counts.values())) != 1:
+            raise ValueError(
+                f"{n_concepts} concepts with {per_cell} positions per cell cannot balance "
+                f"{LIST_SIZE} positions within cluster {cluster}"
+            )
+    return cells
+
+
+def _iter_cells(
+    concepts: Sequence[str], clusters: Sequence[str], per_cell: int, clusters_per_concept: int | None = None
+) -> Iterator[tuple[str, int, str, int]]:
+    """Yield (concept, cluster_index, cluster, position) for a design balanced within clusters."""
+    for concept_index, cluster_index, positions in plan_cells(
+        len(concepts), len(clusters), per_cell, clusters_per_concept
+    ):
+        for position in positions:
+            yield concepts[concept_index], cluster_index, clusters[cluster_index], position
+
+
+def assert_positions_balanced_within_concepts(trials: Sequence[Trial]) -> None:
+    """Every concept meets all ten positions equally often, within each task and condition.
+
+    Otherwise a label prior looks like a between-concept difference, which inflates the variance of
+    `hit` under concept resampling and can produce a false V2 failure.
+    """
+    counts: dict[tuple[str, str, str], Counter] = defaultdict(Counter)
+    for trial in trials:
+        counts[(trial.task, trial.condition, trial.concept)][trial.position] += 1
+    for name, counter in counts.items():
+        if len(counter) != LIST_SIZE or len(set(counter.values())) != 1:
+            raise ValueError(f"Positions are unbalanced within concept for {name}: {dict(counter)}")
 
 
 def fact_query(position: int, cluster_index: int, step: int) -> int:
@@ -290,7 +374,10 @@ def plan_test_trials(
         for condition in conditions:
             trial_alpha = alpha_impact if condition == "random_impact" else alpha
             for concept, cluster_index, cluster, position in _iter_cells(
-                stimuli.concepts_test, list(stimuli.clusters_test), design.positions_per_cell_test
+                stimuli.concepts_test,
+                list(stimuli.clusters_test),
+                design.positions_per_cell_test,
+                design.clusters_per_concept_test,
             ):
                 if task == "T_fact":
                     for step in range(design.fact_queries_per_trial):
@@ -302,6 +389,8 @@ def plan_test_trials(
                     trials.append(
                         Trial(PHASE_TEST, task, condition, concept, cluster, position, None, layer, trial_alpha)
                     )
+    if config.inference_allowed:
+        assert_positions_balanced_within_concepts(trials)
     return trials
 
 

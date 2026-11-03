@@ -9,11 +9,15 @@ share bounds C_t are percentile bounds, not adjusted. Holm can only make these r
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Sequence
 
 import numpy as np
 
+from .identity import identity_differences
 from .stats import (
+    NonFiniteError,
+    approx_percentile_coverage,
     bootstrap_p_two_sided,
     holm_adjust,
     percentile_ci,
@@ -28,14 +32,29 @@ CHANCE = 0.10
 FAMILY_ALPHA = 0.05
 CAPTURE_SHARE_LOWER = 0.5
 GATED_SHARE_UPPER = 0.25
-IMPACT_NOT_MATCHED = "impact match missed its tolerance; read H3 with that in mind"
+IMPACT_NOT_MATCHED = "impact match missed its tolerance, so H3 is uninformative: it was not tested"
+LOW_LABEL_MASS = 0.5
+LOW_COVERAGE = 0.93
+NUMERIC_CELL_FIELDS = ("n", "L", "hit", "clean_hit", "fact_correct", "label_mass", "none_mass")
+
+
+class MixedRunError(ValueError):
+    """Rows in one export came from different code, weights, dtype or library versions."""
+
+
+def _require_finite(value: Any, context: str) -> None:
+    if value is not None and not math.isfinite(value):
+        raise NonFiniteError(f"Non-finite value {value} in {context}")
 
 
 class CellTable:
-    """Trial-weighted cell values as [n_concepts, n_clusters] matrices."""
+    """Trial-weighted cell values as [n_concepts, n_clusters] matrices. Missing cells stay at zero weight."""
 
     def __init__(self, columns: Sequence[str], rows: Sequence[Sequence[Any]], concepts: Sequence[str] | None = None):
         self.rows = [dict(zip(columns, row)) for row in rows]
+        for row in self.rows:
+            for name in NUMERIC_CELL_FIELDS:
+                _require_finite(row.get(name), f"{row['task']}/{row['condition']}/{row['concept']}/{row['cluster']}.{name}")
         if concepts is not None:
             kept = set(concepts)
             self.rows = [row for row in self.rows if row["concept"] in kept]
@@ -64,6 +83,8 @@ class CellTable:
 
 def _summary(point: float, boot: np.ndarray) -> dict[str, float]:
     low, high = percentile_ci(boot)
+    for value in (point, low, high):
+        _require_finite(float(value), "a bootstrap summary")
     return {"point": float(point), "lo": low, "hi": high, "p": bootstrap_p_two_sided(boot)}
 
 
@@ -114,10 +135,12 @@ def _estimates(table: CellTable, n_boot: int, seed: int, min_denominator: float)
         l_point, l_boot = boot.statistic(task, condition, "L")
         hit_point, hit_boot = boot.statistic(task, condition, "hit")
         clean_point, clean_boot = boot.statistic(task, condition, "clean_hit")
+        mass_point, mass_boot = boot.statistic(task, condition, "label_mass")
         by_condition[f"{task}|{condition}"] = {
             "L": _summary(l_point, l_boot),
             "hit": _summary(hit_point, hit_boot),
             "hit_minus_clean": _summary(hit_point - clean_point, hit_boot - clean_boot),
+            "injected_label_mass": _summary(mass_point, mass_boot),
         }
 
     controls: dict[str, Any] = {}
@@ -167,17 +190,24 @@ def _verdicts(estimates: dict[str, Any]) -> dict[str, Any]:
 
 
 def _h3_verdict(estimates: dict[str, Any], export: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """H3 is defined on impact-matched directions, so an unmatched run does not test it."""
     h3 = estimates["h3"]
-    if not h3:
-        return {"supported": None}
     impact_match = export.get("impact_match") or {}
-    if not impact_match.get("match_ok", False):
-        warnings.append(IMPACT_NOT_MATCHED)
+    matched = impact_match.get("match_ok") is True
+    if not h3 or not matched:
+        if not matched:
+            warnings.append(IMPACT_NOT_MATCHED)
+        verdict = "uninformative"
+    else:
+        verdict = "supported" if h3["impact_minus_norm"]["lo"] > 0 else "not_supported"
     return {
-        "supported": h3["impact_minus_norm"]["lo"] > 0,
+        "verdict": verdict,
+        "supported": verdict == "supported",
         "match_ok": impact_match.get("match_ok"),
         "achieved_js": impact_match.get("achieved_js"),
         "target_js": impact_match.get("target_js"),
+        "relative_error": impact_match.get("relative_error"),
+        "tolerance": impact_match.get("tolerance"),
     }
 
 
@@ -204,13 +234,54 @@ def _design_warnings(export: dict[str, Any]) -> list[str]:
             warnings.append(f"positions are unbalanced for {name}: {counts}")
     for row in export.get("clean", []):
         record = dict(zip(export["clean_columns"], row))
-        if record["label_mass"] < 0.5:
+        _require_finite(record["label_mass"], "a clean row")
+        if record["label_mass"] + (record.get("none_mass") or 0.0) < LOW_LABEL_MASS:
             warnings.append(
                 f"clean answer mass {record['label_mass']} on {record['task']}/{record['cluster']}: "
                 "the first token is often not an answer"
             )
     return warnings
 
+
+def _label_mass_report(export: dict[str, Any], estimates: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """Sum of the ten label probabilities, per task. Descriptive only: no rule or filter reads it."""
+    injected = {name: item["injected_label_mass"] for name, item in estimates["by_condition"].items()}
+    clean_totals: dict[str, list[float]] = {}
+    for row in export.get("clean", []):
+        record = dict(zip(export["clean_columns"], row))
+        totals = clean_totals.setdefault(record["task"], [0.0, 0.0])
+        totals[0] += record["n"] * record["label_mass"]
+        totals[1] += record["n"]
+    for name, summary in injected.items():
+        task = name.split("|")[0]
+        if task != "T_inj_none" and summary["point"] < LOW_LABEL_MASS:
+            warnings.append(
+                f"injected label mass {summary['point']:.3f} on {name}: the injected distribution "
+                "has moved off the labels, so L and accuracy on this row are hard to read"
+            )
+    return {
+        "injected": injected,
+        "clean_by_task": {task: total / n for task, (total, n) in clean_totals.items() if n},
+        "note": "Descriptive. Mass is not used by any gate, rule or filter. T_inj_none also puts mass on none.",
+    }
+
+
+def _small_sample_caveat(table: CellTable, warnings: list[str]) -> dict[str, Any]:
+    by_cluster = approx_percentile_coverage(len(table.clusters))
+    by_concept = approx_percentile_coverage(len(table.concepts))
+    known = [value for value in (by_cluster, by_concept) if value is not None]
+    if not known or min(known) < LOW_COVERAGE:
+        warnings.append(
+            f"percentile intervals undercover with {len(table.concepts)} concepts and {len(table.clusters)} "
+            f"clusters: nominal 95% is about {by_concept} if concept variance dominates and about "
+            f"{by_cluster} if cluster variance dominates, in the direction of finding effects"
+        )
+    return {
+        "n_concepts": len(table.concepts),
+        "n_clusters": len(table.clusters),
+        "approx_coverage_if_concept_variance_dominates": by_concept,
+        "approx_coverage_if_cluster_variance_dominates": by_cluster,
+    }
 
 def _secondary_screened(
     export: dict[str, Any], n_boot: int, seed: int, min_denominator: float, top_fraction: float | None
@@ -234,6 +305,10 @@ def analyze(export: dict[str, Any], n_boot: int | None = None, seed: int | None 
     meta = export["meta"]
     if not meta.get("complete"):
         return {"outcome": "incomplete", "n_records": meta.get("n_records"), "meta": meta}
+    environments = meta.get("environments") or []
+    if len(environments) > 1:
+        differing = identity_differences(environments[0], environments[-1])
+        raise MixedRunError(f"Export mixes {len(environments)} run identities, differing in {differing}")
     n_boot = n_boot if n_boot is not None else (meta.get("n_bootstrap") or 2000)
     seed = seed if seed is not None else (meta.get("seed") or 0)
     min_denominator = meta.get("min_denominator")
@@ -242,6 +317,8 @@ def analyze(export: dict[str, Any], n_boot: int | None = None, seed: int | None 
     table = CellTable(export["cell_columns"], export["cells"])
     estimates = _estimates(table, n_boot, seed, min_denominator)
     warnings = _design_warnings(export)
+    label_mass = _label_mass_report(export, estimates, warnings)
+    caveat = _small_sample_caveat(table, warnings)
     v1 = _gate_v1(export)
     v2 = _gate_v2(estimates)
     report: dict[str, Any] = {
@@ -254,6 +331,9 @@ def analyze(export: dict[str, Any], n_boot: int | None = None, seed: int | None 
         "dropped_words": export.get("dropped_words"),
         "dropped_clusters": export.get("dropped_clusters"),
         "dropped_tasks": export.get("dropped_tasks"),
+        "vector_diagnostics": export.get("vector_diagnostics"),
+        "label_mass": label_mass,
+        "small_sample_caveat": caveat,
         "gates": {"V1": v1, "V2": v2},
         "estimates": estimates,
         "verdicts": None,

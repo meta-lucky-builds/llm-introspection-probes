@@ -13,12 +13,29 @@ from .design import PHASE_SCREEN, PHASE_TEST
 BEGIN_MARKER = "=====BEGIN E1 EXPORT====="
 END_MARKER = "=====END E1 EXPORT====="
 LINE_WIDTH = 120
-CELL_COLUMNS = ["task", "condition", "concept", "cluster", "n", "L", "hit", "clean_hit", "fact_correct", "label_mass"]
-CLEAN_COLUMNS = ["task", "cluster", "n", "label_mass", "fact_correct", "none_answers"]
+CELL_COLUMNS = [
+    "task",
+    "condition",
+    "concept",
+    "cluster",
+    "n",
+    "L",
+    "hit",
+    "clean_hit",
+    "fact_correct",
+    "label_mass",
+    "none_mass",
+]
+CLEAN_COLUMNS = ["task", "cluster", "n", "label_mass", "none_mass", "fact_correct", "none_answers"]
 
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
+
+
+def _mean_or_none(items: list[dict[str, Any]], name: str, digits: int) -> float | None:
+    values = [item[name] for item in items if item.get(name) is not None]
+    return round(_mean(values), digits) if values else None
 
 
 def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -26,6 +43,12 @@ def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     records = list(records)
     manifests = [record for record in records if record.get("kind") == "manifest"]
     manifest = manifests[-1] if manifests else {}
+    # Every distinct identity is reported. The session guard allows one, and analysis checks that.
+    environments: list[dict[str, Any]] = []
+    for item in manifests:
+        identity = item.get("identity")
+        if identity is not None and identity not in environments:
+            environments.append(identity)
 
     def single(kind: str) -> dict[str, Any] | None:
         found = [record for record in records if record.get("kind") == kind]
@@ -60,6 +83,7 @@ def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 round(_mean([float(trial["clean_hit"]) for trial in trials]), 5),
                 round(_mean(fact_values), 5) if fact_values else None,
                 round(_mean([trial["label_mass"] for trial in trials]), 4),
+                _mean_or_none(trials, "none_mass", 4),
             ]
         )
 
@@ -78,8 +102,18 @@ def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             fact_hits += fact_correct
             fact_total += len(group)
         clean_rows.append(
-            [task, cluster, len(group), round(_mean([item["label_mass"] for item in group]), 4), fact_correct, none_answers]
+            [
+                task,
+                cluster,
+                len(group),
+                round(_mean([item["label_mass"] for item in group]), 4),
+                _mean_or_none(group, "none_mass", 4),
+                fact_correct,
+                none_answers,
+            ]
         )
+
+    diagnostics = single("vector_diagnostics")
 
     return {
         "v": 1,
@@ -99,7 +133,9 @@ def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "complete": single("run_complete") is not None,
             "n_records": len(records),
             "n_sessions": len(manifests),
+            "environments": environments,
         },
+        "vector_diagnostics": diagnostics.get("by_layer") if diagnostics else None,
         "tokens": manifest.get("tokens"),
         "dropped_words": manifest.get("dropped_words"),
         "dropped_clusters": manifest.get("dropped_clusters"),

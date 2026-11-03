@@ -11,46 +11,40 @@ from torch import nn
 
 from .hooks import capture_layer_outputs
 from .modeling import forward_last_logits
-from .prompts import concept_prompt_text, encode_ids, render_chat
+from .prompts import concept_prompt_text, locate_user_content_end, render_chat
+
+FINGERPRINT_TOLERANCE = 1e-3
 
 
-def _encode_concept_prompt(tokenizer: Any, word: str, prompt_mode: str) -> list[int]:
-    text = concept_prompt_text(word)
-    if prompt_mode == "chat":
-        return encode_ids(tokenizer, render_chat(tokenizer, text))
-    if prompt_mode == "raw":
-        return list(tokenizer(text, add_special_tokens=True)["input_ids"])
-    raise ValueError(f"Unknown prompt mode {prompt_mode}")
-
-
-def final_token_residuals(
+def user_end_residuals(
     model: nn.Module,
     tokenizer: Any,
     layers: dict[int, nn.Module],
     words: Sequence[str],
     batch_size: int,
     device: torch.device,
-    prompt_mode: str = "chat",
 ) -> dict[str, dict[int, torch.Tensor]]:
-    """Return word -> layer -> final-token activation [dim], float32 on CPU.
+    """Return word -> layer -> activation [dim] at the "." ending "Tell me about {word}.".
 
-    Prompts are batched by exact length, so there is no padding and the final token is index -1.
+    Float32 on CPU. Prompts are batched by exact length, so there is no padding. Each word's read
+    index is computed from its own rendering, and tokens after it cannot affect it.
     """
-    by_length: dict[int, list[tuple[str, list[int]]]] = defaultdict(list)
+    by_length: dict[int, list[tuple[str, list[int], int]]] = defaultdict(list)
     for word in words:
-        ids = _encode_concept_prompt(tokenizer, word, prompt_mode)
-        by_length[len(ids)].append((word, ids))
+        text = concept_prompt_text(word)
+        ids, read_index = locate_user_content_end(tokenizer, render_chat(tokenizer, text), text)
+        by_length[len(ids)].append((word, ids, read_index))
 
     residuals: dict[str, dict[int, torch.Tensor]] = {}
     for length in sorted(by_length):
         group = by_length[length]
         for start in range(0, len(group), batch_size):
             batch = group[start : start + batch_size]
-            input_ids = torch.tensor([ids for _, ids in batch], device=device)  # [batch, length]
+            input_ids = torch.tensor([ids for _, ids, _ in batch], device=device)  # [batch, length]
             with torch.inference_mode(), capture_layer_outputs(layers) as captured:
                 forward_last_logits(model, input_ids)
-            for row, (word, _) in enumerate(batch):
-                residuals[word] = {index: captured[index][row, -1, :].clone() for index in layers}
+            for row, (word, _, read_index) in enumerate(batch):
+                residuals[word] = {index: captured[index][row, read_index, :].clone() for index in layers}
     return residuals
 
 
@@ -62,29 +56,37 @@ def concept_vectors(
     baseline_words: Sequence[str],
     batch_size: int,
     device: torch.device,
-    prompt_mode: str = "chat",
-) -> tuple[dict[str, dict[int, torch.Tensor]], dict[str, float]]:
-    """Final-token residual for each concept minus the baseline mean, normalized, per layer.
+) -> tuple[dict[str, dict[int, torch.Tensor]], dict[str, dict[str, float | None]]]:
+    """Residual for each concept minus the baseline mean, normalized, per layer.
 
-    Also returns the mean raw difference norm per layer, as a diagnostic.
+    Normalizing makes a weak signal look like a strong one, so diagnostics per layer report the raw
+    difference norm, that norm relative to the activation, and the mean pairwise cosine.
     """
-    baseline = final_token_residuals(model, tokenizer, layers, baseline_words, batch_size, device, prompt_mode)
+    baseline = user_end_residuals(model, tokenizer, layers, baseline_words, batch_size, device)
     baseline_mean = {
         index: torch.stack([baseline[word][index] for word in baseline_words]).mean(dim=0) for index in layers
     }
-    residuals = final_token_residuals(model, tokenizer, layers, concepts, batch_size, device, prompt_mode)
-    vectors: dict[str, dict[int, torch.Tensor]] = {}
-    norm_sums: dict[int, float] = defaultdict(float)
-    for concept in concepts:
-        vectors[concept] = {}
-        for index in layers:
+    residuals = user_end_residuals(model, tokenizer, layers, concepts, batch_size, device)
+    vectors: dict[str, dict[int, torch.Tensor]] = {concept: {} for concept in concepts}
+    diagnostics: dict[str, dict[str, float | None]] = {}
+    for index in layers:
+        raw_norms = []
+        for concept in concepts:
             difference = residuals[concept][index] - baseline_mean[index]
             norm = difference.norm()
             if not torch.isfinite(norm) or norm <= 0:
                 raise ValueError(f"Degenerate concept vector for {concept!r} at layer {index}")
             vectors[concept][index] = difference / norm
-            norm_sums[index] += float(norm)
-    diagnostics = {str(index): norm_sums[index] / len(concepts) for index in layers}
+            raw_norms.append(float(norm))
+        stacked = torch.stack([vectors[concept][index] for concept in concepts])  # [n_concepts, dim]
+        n = len(concepts)
+        cosine = float(((stacked @ stacked.T).sum() - n) / (n * (n - 1))) if n > 1 else None
+        mean_raw = sum(raw_norms) / n
+        diagnostics[str(index)] = {
+            "mean_raw_norm": mean_raw,
+            "mean_raw_norm_over_activation_norm": mean_raw / float(baseline_mean[index].norm()),
+            "mean_pairwise_cosine": cosine,
+        }
     return vectors, diagnostics
 
 
@@ -98,3 +100,23 @@ def random_unit_vector(dim: int, seed: int, name: str) -> torch.Tensor:
     generator = torch.Generator(device="cpu").manual_seed(int.from_bytes(digest[:8], "big") % (2**63))
     vector = torch.randn(dim, generator=generator, dtype=torch.float64)
     return (vector / vector.norm()).float()
+
+
+def vector_fingerprint(vectors: dict[str, dict[int, torch.Tensor]], seed: int) -> dict[str, float]:
+    """Projection of each vector on a fixed direction.
+
+    Vectors are recomputed when a runtime is lost, and floats can differ slightly between machines,
+    so comparison uses a tolerance rather than a hash of the bytes.
+    """
+    fingerprint: dict[str, float] = {}
+    for concept, by_layer in vectors.items():
+        for layer, vector in by_layer.items():
+            probe = random_unit_vector(vector.numel(), seed, "fingerprint")
+            fingerprint[f"{concept}|{layer}"] = float(torch.dot(vector, probe))
+    return fingerprint
+
+
+def fingerprints_match(first: dict[str, float], second: dict[str, float]) -> bool:
+    if set(first) != set(second):
+        return False
+    return all(abs(first[key] - second[key]) <= FINGERPRINT_TOLERANCE for key in first)

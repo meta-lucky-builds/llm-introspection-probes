@@ -2,9 +2,8 @@
   "tier": "large",
   "inference_allowed": true,
   "seed": 20261104,
-  "model": {"name": "Qwen/Qwen3-4B", "revision": "main"},
+  "model": {"name": "Qwen/Qwen3-4B", "revision": "1cfa9a7208912126459214e8b04321603b3df60c"},
   "data_dir": "../data",
-  "concept_prompt_mode": "chat",
   "design": {
     "n_concepts_calibration": 20,
     "n_clusters_calibration": 5,

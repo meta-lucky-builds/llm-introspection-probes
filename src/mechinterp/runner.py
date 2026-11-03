@@ -41,22 +41,35 @@ from .design import (
 )
 from .export import build_export, encode_export
 from .hooks import inject
-from .modeling import choose_device, forward_last_logits, get_layers, hidden_size, load_model_and_tokenizer
+from .identity import identity_differences, run_identity
+from .modeling import (
+    choose_device,
+    choose_dtype,
+    forward_last_logits,
+    get_layers,
+    hidden_size,
+    load_model_and_tokenizer,
+    resolve_model_commit,
+)
 from .prompts import (
     LIST_SIZE,
     RenderedPrompt,
     build_prompt,
+    concept_prompt_text,
     decode_token,
     is_single_token_word,
+    locate_user_content_end,
+    render_chat,
     resolve_label_ids,
     resolve_none_id,
+    token_hash,
 )
-from .scoring import answer_mass, js_divergence, localization_effect, margin
-from .vectors import concept_vectors, random_unit_vector
+from .scoring import answer_mass, assert_finite, js_divergence, localization_effect, margin
+from .stats import NonFiniteError
+from .vectors import concept_vectors, fingerprints_match, random_unit_vector, vector_fingerprint
 
 CleanKey = tuple[str, str, "int | None"]
 NONE_TASK = "T_inj_none"
-NONE_ANSWER_INDEX = LIST_SIZE
 SHAM_TOLERANCE = 1e-4
 SECONDS_BETWEEN_PROGRESS_LINES = 60.0
 
@@ -70,15 +83,23 @@ def _clean_store_key(clean_key: CleanKey) -> str:
     return f"clean|{task}|{cluster}|q{query}"
 
 
-def environment_info(device: torch.device) -> dict[str, Any]:
+def library_versions() -> dict[str, str]:
     import numpy
+    import tokenizers
     import transformers
 
     return {
         "python": platform.python_version(),
         "torch": torch.__version__,
         "transformers": transformers.__version__,
+        "tokenizers": tokenizers.__version__,
         "numpy": numpy.__version__,
+    }
+
+
+def environment_info(device: torch.device) -> dict[str, Any]:
+    return {
+        **library_versions(),
         "platform": platform.platform(),
         "device": str(device),
         "threads": torch.get_num_threads(),
@@ -93,16 +114,33 @@ class Session:
         model: nn.Module | None = None,
         tokenizer: Any = None,
         device: torch.device | None = None,
+        model_commit: str | None = None,
     ) -> None:
+        """model, tokenizer and model_commit are for tests. A real run resolves and pins the commit."""
         self.config = config
         self.out_dir = Path(out_dir)
         self.store = ResultStore(self.out_dir / "results.jsonl")
         self.device = device if device is not None else choose_device()
         raw_data = load_data(config.data_dir)
-        self._assert_same_experiment(raw_data.sha256)
 
-        if model is None or tokenizer is None:
-            model, tokenizer = load_model_and_tokenizer(config.model_name, config.model_revision, self.device)
+        load_needed = model is None or tokenizer is None
+        if load_needed:
+            # A resumed run keeps the weights it started with, whatever the revision now points at.
+            commit = self._stored_commit() or resolve_model_commit(config.model_name, config.model_revision)
+            dtype = str(choose_dtype(self.device))
+        else:
+            commit = model_commit or getattr(getattr(model, "config", None), "_commit_hash", None) or "local"
+            dtype = str(next(model.parameters()).dtype)
+        self.identity = run_identity(
+            config.config_hash, raw_data.sha256, commit, dtype, self.device.type, library_versions()
+        )
+        self._assert_same_identity()
+
+        if load_needed:
+            model, tokenizer = load_model_and_tokenizer(config.model_name, commit, self.device)
+            loaded_dtype = str(next(model.parameters()).dtype)
+            if loaded_dtype != dtype:
+                raise AssertionError(f"Asked for dtype {dtype}, loaded {loaded_dtype}")
         self.model = model
         self.tokenizer = tokenizer
         self.layers = get_layers(model)
@@ -129,10 +167,24 @@ class Session:
 
     # Setup
 
-    def _assert_same_experiment(self, data_sha256: str) -> None:
+    def _stored_commit(self) -> str | None:
         for manifest in self.store.records("manifest"):
-            if manifest["config_hash"] != self.config.config_hash or manifest["data_sha256"] != data_sha256:
-                raise ValueError(f"{self.store.path} belongs to a different config or data version")
+            return (manifest.get("identity") or {}).get("model_commit")
+        return None
+
+    def _assert_same_identity(self) -> None:
+        """Rows from a different code, config, data, weights, dtype, device type or library must not mix.
+
+        L subtracts a stored clean logit from a new injected one, so a mixed store corrupts it silently.
+        Start a new output directory instead.
+        """
+        for manifest in self.store.records("manifest"):
+            differences = identity_differences(manifest.get("identity") or {}, self.identity)
+            if differences:
+                raise ValueError(
+                    f"{self.store.path} was written by a different run, differing in {differences}. "
+                    "Use a new output directory."
+                )
 
     def _resolve_answer_tokens(self) -> None:
         """Resolve labels in rendered context, per task, and require the same ids everywhere."""
@@ -168,7 +220,8 @@ class Session:
                     "inference_allowed": config.inference_allowed,
                     "model": config.model_name,
                     "revision": config.model_revision,
-                    "commit": getattr(getattr(self.model, "config", None), "_commit_hash", None),
+                    "commit": self.identity["model_commit"],
+                    "identity": self.identity,
                     "config_hash": config.config_hash,
                     "data_sha256": data_sha256,
                     "seed": config.seed,
@@ -248,7 +301,7 @@ class Session:
         concepts = [*self.stimuli.concepts_calibration, *self.stimuli.concepts_test]
         if path.exists():
             saved = torch.load(path, map_location="cpu", weights_only=True)
-            if saved["config_hash"] == self.config.config_hash:
+            if saved["identity"] == self.identity:
                 self.vectors = {
                     concept: {layer: saved["vectors"][f"{concept}|{layer}"] for layer in grid_layers}
                     for concept in concepts
@@ -256,7 +309,7 @@ class Session:
         if not self.vectors:
             print(f"Computing concept vectors for {len(concepts)} concepts", flush=True)
             started = time.monotonic()
-            self.vectors, norms = concept_vectors(
+            self.vectors, diagnostics = concept_vectors(
                 self.model,
                 self.tokenizer,
                 {layer: self.layers[layer] for layer in grid_layers},
@@ -264,10 +317,9 @@ class Session:
                 self.stimuli.baseline_words,
                 self.batch_size,
                 self.device,
-                self.config.concept_prompt_mode,
             )
             payload = {
-                "config_hash": self.config.config_hash,
+                "identity": self.identity,
                 "vectors": {
                     f"{concept}|{layer}": vector
                     for concept, by_layer in self.vectors.items()
@@ -277,17 +329,23 @@ class Session:
             temporary = path.with_suffix(".tmp")
             torch.save(payload, temporary)
             os.replace(temporary, path)
-            if not self.store.has("vector_diagnostics"):
+            fingerprint = vector_fingerprint(self.vectors, self.config.seed)
+            stored = self.store.get("vector_diagnostics")
+            if stored is None:
                 self.store.append(
                     [
                         {
                             "key": "vector_diagnostics",
                             "kind": "vector_diagnostics",
-                            "mean_raw_norm_by_layer": norms,
+                            "by_layer": diagnostics,
+                            "fingerprint": fingerprint,
                             "sec": time.monotonic() - started,
                         }
                     ]
                 )
+            elif not fingerprints_match(stored["fingerprint"], fingerprint):
+                # A lost runtime recomputes vectors, and they must be the ones the stored rows used.
+                raise ValueError("Recomputed concept vectors differ from the ones this run's rows used")
         dim = hidden_size(self.model)
         for concept in concepts:
             self.random_vectors[concept] = random_unit_vector(dim, self.config.seed, concept)
@@ -322,6 +380,7 @@ class Session:
         prompts = [self._prompt(key) for key in keys]
         started = time.monotonic()
         logits = self._forward(self._ids_tensor(prompts), None)  # [batch, vocab]
+        assert_finite(logits, f"clean run of {keys[0]}")
         seconds = (time.monotonic() - started) / len(keys)
         scored_ids = [*self.label_ids, *([] if self.none_id is None else [self.none_id])]
         scored = logits[:, scored_ids].double()  # [batch, 10 or 11]
@@ -342,19 +401,28 @@ class Session:
                     "cluster": cluster,
                     "query": query,
                     "length": len(prompts[row].input_ids),
+                    "prompt_hash": token_hash(prompts[row].input_ids),
                     # Full float precision so that a resumed run reproduces m_clean exactly.
                     "logits": [float(value) for value in scored[row]],
                     "answer": answer,
-                    "label_mass": float(answer_mass(logits[row : row + 1], answer_ids)[0]),
+                    "label_mass": float(answer_mass(logits[row : row + 1], self.label_ids)[0]),
+                    "none_mass": self._none_mass(logits, row, task),
                     "sec": seconds,
                 }
             )
         self.store.append(new_records)
 
+    def _none_mass(self, logits: torch.Tensor, row: int, task: str) -> float | None:
+        if task != NONE_TASK or self.none_id is None:
+            return None
+        return float(answer_mass(logits[row : row + 1], [self.none_id])[0])
+
     def _clean_answer_logits(self, clean_key: CleanKey) -> list[float]:
         record = self.store.get(_clean_store_key(clean_key))
         if record is None:
             raise AssertionError(f"Clean run missing for {clean_key}")
+        if record["prompt_hash"] != token_hash(self._prompt(clean_key).input_ids):
+            raise AssertionError(f"Clean and injected tokens differ for {clean_key}")
         return record["logits"]
 
     # Injected runs
@@ -390,6 +458,7 @@ class Session:
 
         started = time.monotonic()
         logits = self._forward(input_ids, (layer, token_positions, vectors, alphas))  # [batch, vocab]
+        assert_finite(logits, f"injected run of {batch[0].key}")
         seconds = (time.monotonic() - started) / len(batch)
 
         label_positions = torch.tensor([trial.position for trial in batch])  # [batch], in 0..9
@@ -420,6 +489,8 @@ class Session:
                 "query": trial.query,
                 "layer": trial.layer,
                 "alpha": trial.alpha,
+                "prompt_hash": token_hash(prompts[row].input_ids),
+                "injected_token": int(token_positions[row]),
                 "L": float(effect[row]),
                 "m_injected": float(m_injected[row]),
                 "m_clean": float(m_clean[row]),
@@ -427,7 +498,8 @@ class Session:
                 "hit": answer == trial.position,
                 "clean_hit": clean_answer == trial.position,
                 "fact_correct": (answer == trial.query) if trial.query is not None else None,
-                "label_mass": float(answer_mass(logits[row : row + 1], answer_ids)[0]),
+                "label_mass": float(answer_mass(logits[row : row + 1], self.label_ids)[0]),
+                "none_mass": self._none_mass(logits, row, trial.task),
                 "sec": seconds,
             }
             if measure_js:
@@ -650,10 +722,25 @@ class Session:
         estimate = equivalent_prompts * seconds_per_prompt
         # Shown so that a wrong first token or template is caught before any real run.
         clean_logits = self._forward(input_ids[:1], None)  # [1, vocab]
+        assert_finite(clean_logits, "the dry run")
         top_tokens = clean_logits[0].topk(5).indices.tolist()
+        clean_label_mass_by_task = {}
+        for task in self.test_tasks:
+            task_prompt = self._prompt((task, cluster, 0 if task == "T_fact" else None))
+            task_logits = self._forward(self._ids_tensor([task_prompt]), None)
+            clean_label_mass_by_task[task] = float(answer_mass(task_logits, self.label_ids)[0])
+        vector_text = concept_prompt_text(self.stimuli.baseline_words[0])
+        vector_ids, read_index = locate_user_content_end(
+            self.tokenizer, render_chat(self.tokenizer, vector_text), vector_text
+        )
         result = {
             "prompt_tail": prompt.text[-120:],
+            "list_words_at_positions": [decode_token(self.tokenizer, prompt.input_ids[i]) for i in prompt.positions],
+            "labels_decoded": [decode_token(self.tokenizer, token) for token in self.label_ids],
+            "vector_read_token": decode_token(self.tokenizer, vector_ids[read_index]),
+            "vector_read_tokens_from_end": len(vector_ids) - read_index,
             "clean_label_mass": float(answer_mass(clean_logits, self.label_ids)[0]),
+            "clean_label_mass_by_task": clean_label_mass_by_task,
             "clean_top_tokens": [decode_token(self.tokenizer, token) for token in top_tokens],
             "prompt_tokens": len(prompt.input_ids),
             "batch_size": n,
@@ -678,4 +765,7 @@ def _mean_js(records: Sequence[dict[str, Any] | None]) -> float:
         if record is None or "js" not in record:
             raise AssertionError("A JS measurement is missing")
         values.append(record["js"])
-    return sum(values) / len(values)
+    mean = sum(values) / len(values)
+    if not math.isfinite(mean):
+        raise NonFiniteError("Non-finite JS divergence")
+    return mean

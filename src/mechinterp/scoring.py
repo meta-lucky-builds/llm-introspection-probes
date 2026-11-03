@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import torch
 
+from .stats import NonFiniteError
+
 _TINY = 1e-300
+
+
+def assert_finite(logits: torch.Tensor, context: str) -> None:
+    """A NaN must stop the run. Downstream it would turn into an ordinary-looking verdict."""
+    if not torch.isfinite(logits).all():
+        raise NonFiniteError(f"Non-finite logits in {context}")
 
 
 def margin(label_logits: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

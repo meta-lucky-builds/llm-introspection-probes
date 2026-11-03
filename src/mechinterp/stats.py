@@ -7,6 +7,23 @@ from typing import Sequence
 import numpy as np
 
 
+class NonFiniteError(ValueError):
+    """Results contain NaN or infinity. This is a broken run, not a finding about the model."""
+
+
+def approx_percentile_coverage(n_levels: int, level: float = 0.95, seed: int = 0, n_draws: int = 200_000) -> float | None:
+    """Approximate true coverage of a percentile interval when one dimension's variance dominates.
+
+    The bootstrap SD of a mean of n levels carries a factor sqrt((n-1)/n), and the right reference is
+    t with n-1 degrees of freedom. Returns P(|t| <= z * sqrt((n-1)/n)), or None for one level.
+    """
+    if n_levels < 2:
+        return None
+    z = {0.95: 1.959964}[level]
+    draws = np.random.default_rng(seed).standard_t(n_levels - 1, n_draws)
+    return float(np.mean(np.abs(draws) <= z * np.sqrt((n_levels - 1) / n_levels)))
+
+
 def two_way_weights(
     n_concepts: int, n_clusters: int, n_boot: int, rng: np.random.Generator
 ) -> tuple[np.ndarray, np.ndarray]:

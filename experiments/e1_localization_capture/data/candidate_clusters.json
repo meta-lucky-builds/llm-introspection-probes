@@ -13,10 +13,20 @@
     "house_parts": ["roof", "wall", "floor", "door", "window", "stairs", "ceiling", "basement", "attic", "porch", "garage", "hallway", "chimney", "balcony"],
     "school": ["pencil", "chalk", "classroom", "backpack", "lesson", "homework", "teacher", "student", "textbook", "library", "cafeteria", "gym", "locker", "playground"],
     "landscape": ["hill", "valley", "river", "lake", "meadow", "stream", "beach", "cliff", "island", "forest", "field", "desert", "canyon", "shore"],
-    "bathroom": ["towel", "soap", "shampoo", "brush", "comb", "sponge", "razor", "toothbrush", "bathtub", "shower", "faucet", "toilet", "tissue", "bathrobe"],
+    "bathroom": ["towel", "soap", "shampoo", "brush", "comb", "sponge", "razor", "toothbrush", "bathtub", "shower", "faucet", "toilet", "tissue", "bathrobe", "bath", "tub", "tap", "drain", "mat", "plug"],
     "farm_animals": ["horse", "cow", "sheep", "goat", "pig", "chicken", "duck", "rabbit", "deer", "mouse", "squirrel", "turtle", "frog", "owl"],
     "groceries": ["bread", "butter", "cheese", "milk", "egg", "rice", "pasta", "soup", "salad", "sauce", "flour", "sugar", "salt", "honey"],
     "travel": ["train", "plane", "boat", "ship", "subway", "ferry", "station", "airport", "platform", "ticket", "luggage", "suitcase", "passport", "harbor"],
-    "play": ["card", "dice", "chess", "ball", "kite", "puzzle", "doll", "marble", "balloon", "toy", "game", "board", "tent", "blanket"]
+    "play": ["card", "dice", "chess", "ball", "kite", "puzzle", "doll", "marble", "balloon", "toy", "game", "board", "tent", "blanket"],
+    "sports": ["racket", "goal", "helmet", "whistle", "court", "pitch", "stadium", "trophy", "medal", "team", "coach", "referee", "score", "jersey"],
+    "music": ["piano", "guitar", "drum", "violin", "flute", "harp", "song", "band", "note", "concert", "choir", "organ", "bell", "horn"]
+  },
+  "pilot_calibration": {
+    "pilot_pockets": ["coin", "wallet", "purse", "key", "ring", "watch", "necklace", "bracelet", "earring", "badge", "stamp", "receipt", "coupon", "map"],
+    "pilot_sky": ["cloud", "rain", "wind", "storm", "breeze", "mist", "hail", "puddle", "sunset", "dawn", "shadow", "sky", "moon", "sun"]
+  },
+  "pilot_test": {
+    "pilot_plants": ["leaf", "branch", "root", "flower", "rose", "tulip", "oak", "pine", "moss", "fern", "vine", "petal", "twig", "stem"],
+    "pilot_pets": ["cat", "dog", "fish", "bird", "snake", "bear", "fox", "monkey", "zebra", "camel", "seal", "crab", "ant", "bat"]
   }
 }
