@@ -33,6 +33,11 @@ TASK_INSTRUCTIONS = {
 }
 TASKS = tuple(TASK_INSTRUCTIONS)
 ANSWER_CUE = "Reply with your answer only."
+# Prefilled on the assistant turn so the scored token is the label itself: without it small models
+# open with a word such as "Position". It ends in a newline so a label needs no leading space on any
+# tokenizer. T_inj_none goes without, because a position prefix would rule out answering none.
+ANSWER_PREFIX = "Position number:\n"
+UNPREFIXED_TASKS = frozenset({"T_inj_none"})
 FALLBACK_CHAT_FORMAT = "User: {text}\nAssistant:\n"
 
 
@@ -212,6 +217,8 @@ def build_prompt(
     tokenizer: Any, task: str, cluster: str, words: Sequence[str], query: int | None = None
 ) -> RenderedPrompt:
     rendered = render_chat(tokenizer, user_text(task, words, query))
+    if task not in UNPREFIXED_TASKS:
+        rendered += ANSWER_PREFIX
     input_ids, offsets = encode_with_offsets(tokenizer, rendered)
     positions = tuple(
         find_word_token(tokenizer, rendered, input_ids, offsets, start, end)

@@ -98,6 +98,15 @@ def test_label_ids_after_newline_have_no_space(tokenizer) -> None:
     assert len(set(ids)) == len(LABELS)
 
 
+def test_answer_prefix_is_identical_on_scored_tasks_and_absent_when_none_is_allowed(tokenizer) -> None:
+    for task in ("T_inj", "T_pick", "T_fav", "T_odd"):
+        assert build_prompt(tokenizer, task, "calone", WORDS).text.endswith(prompts.ANSWER_PREFIX)
+    assert build_prompt(tokenizer, "T_fact", "calone", WORDS, query=0).text.endswith(prompts.ANSWER_PREFIX)
+    assert not build_prompt(tokenizer, "T_inj_none", "calone", WORDS).text.endswith(prompts.ANSWER_PREFIX)
+    labels = resolve_label_ids(tokenizer, build_prompt(tokenizer, "T_inj", "calone", WORDS).text)
+    assert labels == resolve_label_ids(tokenizer, build_prompt(tokenizer, "T_inj_none", "calone", WORDS).text)
+
+
 def test_label_after_non_space_uses_the_spaced_token(tokenizer) -> None:
     token = resolve_answer_token(tokenizer, "Answer:", "3")
     assert decode_token(tokenizer, token) == " 3"

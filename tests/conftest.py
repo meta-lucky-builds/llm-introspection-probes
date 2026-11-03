@@ -13,7 +13,7 @@ import torch
 from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
-from mechinterp.prompts import ANSWER_CUE, FALLBACK_CHAT_FORMAT, LABELS, TASK_INSTRUCTIONS, concept_prompt_text
+from mechinterp.prompts import ANSWER_CUE, ANSWER_PREFIX, FALLBACK_CHAT_FORMAT, LABELS, TASK_INSTRUCTIONS, concept_prompt_text
 
 # Like a GPT-2 style tokenizer: a word or digit absorbs one leading space.
 ABSORBING_PATTERN = r" ?[A-Za-z]+| ?[0-9]|\n|[^A-Za-z0-9\n ]| "
@@ -59,6 +59,7 @@ def base_texts() -> list[str]:
     return [
         *[FALLBACK_CHAT_FORMAT.format(text=text) for text in [*TASK_INSTRUCTIONS.values(), *concept_prompts]],
         ANSWER_CUE,
+        ANSWER_PREFIX,
         *[f"0: {word}" for word in known],
         *[f"the word {word}?" for word in known],
         *LABELS,

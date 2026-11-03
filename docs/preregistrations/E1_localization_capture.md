@@ -102,3 +102,6 @@ All entries below were made before any data was collected.
 - **Label mass.** Total probability on the labels under injection is reported per task. It is descriptive, with a warning below 0.5.
 - **Screening.** The secondary analysis uses test concepts on calibration clusters, and is off at the small tier.
 - **Prompt details.** Instruction comes before the list. `none` is matched as lowercase only.
+
+2026-11-04, after the first dry run on Qwen3-0.6B, which measured label mass only and scored no trial:
+- **Answer prefix.** Clean label mass was far too low to score first-token logits: T_inj 0.24, T_pick 0.56, T_fav 0.72, T_odd 0.02, T_fact 0.12, with top tokens such as "Position" and "The". The assistant turn is now prefilled with the identical text "Position number:\n" on all tasks except T_inj_none, which stays unprefixed because a position prefix rules out answering none. Hahami et al. also prefill. This forces a position answer, so the design cannot observe a preference to decline except through T_inj_none.
