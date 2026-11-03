@@ -17,6 +17,17 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 - Check plan usage before launching agents. At 90% of the 5-hour limit or above, or 85% of the weekly limit or above, start no new agents; finish what is running, save state here, and wait for the reset.
 - Scope agents narrowly. Send paper reading to agents rather than the coordinator, and do not repeat retrievals already recorded in `docs/literature/`.
 
+## Avoiding local optima
+- Every experiment gets a stop rule before it runs: what result ends this line of work, and what comes next.
+- Do not tune a null into a positive. A failed preregistered test is logged and closed; a follow-up needs its own preregistration and a new reason.
+- After two consecutive experiments on one question teach nothing new, change the question, the method or the level of analysis.
+- At each result, reread the hypothesis ledger, add what the result suggests, and pick the next experiment by expected information per unit of compute. Keep the ledger spanning more than one research direction.
+- Pivoting changes what we study. It never relaxes rigor or these rules.
+
+## Context habits
+- Keep findings in the repo, not in the conversation. Have agents write notes to files and return short summaries.
+- Read only the parts of files and papers that a decision needs.
+
 ## Current state
 - Branch: `research/e1-localization-capture`.
 - E1 preregistered ([prereg](preregistrations/E1_localization_capture.md)); no data collected.
