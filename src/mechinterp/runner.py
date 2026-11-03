@@ -90,7 +90,8 @@ def library_versions() -> dict[str, str]:
 
     return {
         "python": platform.python_version(),
-        "torch": torch.__version__,
+        # A plain str: TorchVersion is not an allowed global for torch.load(weights_only=True).
+        "torch": str(torch.__version__),
         "transformers": transformers.__version__,
         "tokenizers": tokenizers.__version__,
         "numpy": numpy.__version__,
