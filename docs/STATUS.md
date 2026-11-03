@@ -34,7 +34,7 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 - E1 harness written and reviewed; pilot passed on Qwen3-0.6B (results in `results/e1/pilot/`, pipeline check only).
 
 ## Next steps
-1. Run the E1 small tier (Qwen3-1.7B) on Colab: start it once in one cell and check at heartbeats. Do not keep an agent polling; it burned the 5-hour limit.
+1. The E1 small tier (Qwen3-1.7B) is running on Colab as a background process (`/content/run_small.py`; status in `/content/e1_small.status`; up to about 6.6 h). Colab cell `Y3XFylVbUT9h` blocks until it finishes and prints the status. At heartbeats read only that cell's output, and never queue more cells while it runs, because they block the kernel. MCP cell calls time out at 120 s though the cell keeps running. Do not keep an agent polling; it burned the 5-hour limit.
 2. Save the export, analyze against the prereg's decision rules, update [hypotheses](hypotheses.md).
 3. Preregister and run the next candidate from the ledger; write GPU-tier code for later.
 
