@@ -31,14 +31,12 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 ## Current state
 - Branch: `research/e1-localization-capture`.
 - E1 preregistered ([prereg](preregistrations/E1_localization_capture.md)); no data collected.
-- Harness implementation in progress.
+- E1 harness written and reviewed; pilot passed on Qwen3-0.6B (results in `results/e1/pilot/`, pipeline check only).
 
 ## Next steps
-1. Finish the E1 harness; independent code review.
-2. Push; pass tests on GitHub Actions.
-3. Run the E1 pilot, then the small tier, on Colab (CPU, 12 GB at last check). Commit results.
-4. Analyze against the prereg's decision rules; update [hypotheses](hypotheses.md).
-5. Preregister and run the next candidate from the ledger; write GPU-tier code for later.
+1. Run the E1 small tier (Qwen3-1.7B) on Colab: start it once in one cell and check at heartbeats. Do not keep an agent polling; it burned the 5-hour limit.
+2. Save the export, analyze against the prereg's decision rules, update [hypotheses](hypotheses.md).
+3. Preregister and run the next candidate from the ledger; write GPU-tier code for later.
 
 ## Waiting on the owner
 - What word "sleep framework" was a typo for.

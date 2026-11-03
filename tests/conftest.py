@@ -71,7 +71,7 @@ def base_texts() -> list[str]:
 
 @pytest.fixture(scope="session")
 def tokenizer() -> Any:
-    return make_tokenizer(base_texts())
+    return make_tokenizer(base_texts(), SPLIT_SPACE_PATTERN)
 
 
 def tiny_qwen(vocab_size: int) -> Any:

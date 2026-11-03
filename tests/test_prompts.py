@@ -91,7 +91,7 @@ def test_trimmed_and_untrimmed_offsets_both_locate_the_word(tokenizer, monkeypat
 
 
 def test_label_ids_after_newline_have_no_space(tokenizer) -> None:
-    prompt = build_prompt(tokenizer, "T_inj", "calone", WORDS)
+    prompt = build_prompt(tokenizer, "T_inj_none", "calone", WORDS)
     assert prompt.text.endswith("\n")
     ids = resolve_label_ids(tokenizer, prompt.text)
     assert [decode_token(tokenizer, token) for token in ids] == list(LABELS)
@@ -107,7 +107,8 @@ def test_answer_prefix_is_identical_on_scored_tasks_and_absent_when_none_is_allo
     assert labels == resolve_label_ids(tokenizer, build_prompt(tokenizer, "T_inj_none", "calone", WORDS).text)
 
 
-def test_label_after_non_space_uses_the_spaced_token(tokenizer) -> None:
+def test_label_after_non_space_uses_the_spaced_token() -> None:
+    tokenizer = make_tokenizer(["Answer:", " 3"])
     token = resolve_answer_token(tokenizer, "Answer:", "3")
     assert decode_token(tokenizer, token) == " 3"
 

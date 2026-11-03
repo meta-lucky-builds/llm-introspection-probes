@@ -34,9 +34,11 @@ TASK_INSTRUCTIONS = {
 TASKS = tuple(TASK_INSTRUCTIONS)
 ANSWER_CUE = "Reply with your answer only."
 # Prefilled on the assistant turn so the scored token is the label itself: without it small models
-# open with a word such as "Position". It ends in a newline so a label needs no leading space on any
-# tokenizer. T_inj_none goes without, because a position prefix would rule out answering none.
-ANSWER_PREFIX = "Position number:\n"
+# open with a word such as "Position". Chosen once by clean label mass, see results/e1/pilot/prefix_sweep.txt.
+# The trailing space is its own token on Qwen, Llama 3 and Gemma, so the label follows directly; a tokenizer
+# that merges a space into the digit raises in resolve_answer_token. T_inj_none goes without, because a
+# position prefix would rule out answering none.
+ANSWER_PREFIX = "Position number: "
 UNPREFIXED_TASKS = frozenset({"T_inj_none"})
 FALLBACK_CHAT_FORMAT = "User: {text}\nAssistant:\n"
 
