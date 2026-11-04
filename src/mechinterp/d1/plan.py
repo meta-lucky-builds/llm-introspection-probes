@@ -17,6 +17,8 @@ Y is the quadrant's first term. A transcript gets one held-out and one training 
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -33,6 +35,7 @@ from .data import (
     select_balanced,
     split_by_prompt,
     stable_hash,
+    write_jsonl,
 )
 from .families import partition_of
 from .paths import D1Paths
@@ -52,6 +55,38 @@ from .sizing import allocate_per_class
 from .specificity import select_specificity
 
 ANSWER_FOR_KIND = {"yes": YES, "no": NO, "train_yes": YES, "train_no": NO, "sham": YES}
+# Under this many rows, starting processes costs more than it saves, and the tiny test sets stay in one process.
+PARALLEL_MIN_ROWS = 2000
+MAX_TOKENIZER_PROCESSES = 32
+_FORK_SHARED: tuple[Any, ...] = ()
+
+
+def _fork_call(index: int) -> Any:
+    function, items, tokenizer = _FORK_SHARED
+    return function(items[index], tokenizer)
+
+
+def map_tokenized(function: Callable[[Any, Any], Any], items: Sequence[Any], tokenizer: Any, processes: int | None = None, min_rows: int = PARALLEL_MIN_ROWS) -> list[Any]:
+    """function(item, tokenizer) for every item, on all cores, in the items' order. All GPUs wait for this stage, so it is worth it.
+
+    A pure function of its inputs, so the answer does not depend on how many processes ran it. Forked children inherit the
+    items and the tokenizer, so nothing but the index and the answer crosses a pipe. Where fork does not exist, one process.
+    """
+    if processes is None:
+        try:
+            processes = len(os.sched_getaffinity(0))
+        except AttributeError:
+            processes = os.cpu_count() or 1
+        processes = min(processes, MAX_TOKENIZER_PROCESSES)
+    if processes <= 1 or len(items) < min_rows or "fork" not in multiprocessing.get_all_start_methods():
+        return [function(item, tokenizer) for item in items]
+    global _FORK_SHARED
+    _FORK_SHARED = (function, items, tokenizer)
+    try:
+        with multiprocessing.get_context("fork").Pool(processes) as pool:
+            return pool.map(_fork_call, range(len(items)), chunksize=max(8, len(items) // (processes * 16)))
+    finally:
+        _FORK_SHARED = ()
 
 
 def write_set(paths: D1Paths, tag: str, name: str, items: Iterable[dict[str, Any]]) -> dict[str, int]:
@@ -66,6 +101,8 @@ def write_set(paths: D1Paths, tag: str, name: str, items: Iterable[dict[str, Any
             handle.write(json.dumps({"ids": item["ids"], "read": item["read"], "answer_pos": item["answer_pos"]}, separators=(",", ":")) + "\n")
             for key in ("t", "kind", "y", "family", "group", "wording", "key"):
                 columns[key].append(item.get(key))
+            # Capture shards are cut from these, so no worker has to parse the items to know a shard's rows.
+            columns["lengths"].append(len(item["ids"]))
             n += 1
             tokens += len(item["ids"])
     temporary.replace(target)
@@ -89,7 +126,8 @@ def followup_length(tokenizer: Any, record: Transcript, longest_wording: str) ->
 def filter_by_length(records: Sequence[Transcript], tokenizer: Any, wordings: Sequence[str], max_tokens: int) -> tuple[list[Transcript], int]:
     """Same rule for both classes. The longest wording decides, so a kept transcript fits with any wording."""
     longest = max(wordings, key=len)
-    kept = [record for record in records if followup_length(tokenizer, record, longest) <= max_tokens]
+    lengths = map_tokenized(lambda record, shared: followup_length(shared, record, longest), records, tokenizer)
+    kept = [record for record, length in zip(records, lengths) if length <= max_tokens]
     return kept, len(records) - len(kept)
 
 
@@ -105,18 +143,26 @@ def scored_items(
     """The scored prompts for a list of transcripts, in a fixed order."""
     held_out = assign_wordings(records, len(cfg.wordings_held_out), cfg.seed, f"{salt}|held_out")
     train = assign_wordings(records, len(cfg.wordings_train), cfg.seed, f"{salt}|train")
-    english_left = sham_rows
-    for t, record in enumerate(records):
+    # The first English transcripts get the sham question. Decided here, so that each transcript can then be built on its own.
+    english_left = sham_rows if "sham" in kinds else 0
+    asked_sham: list[bool] = []
+    for record in records:
+        asked = english_left > 0 and record.language == "en"
+        english_left -= int(asked)
+        asked_sham.append(asked)
+
+    def items_of(t: int, shared: Any) -> list[dict[str, Any]]:
+        record = records[t]
         common = {"t": t, "y": record.y, "family": record.family, "group": record.group, "key": record.key}
+        built: list[dict[str, Any]] = []
         for kind in kinds:
             if kind == "base":
-                ids = base_read_ids(tokenizer, record.messages, record.tools)
-                yield {**common, "kind": kind, "wording": None, "ids": ids, "read": len(ids) - 1, "answer_pos": -1}
+                ids = base_read_ids(shared, record.messages, record.tools)
+                built.append({**common, "kind": kind, "wording": None, "ids": ids, "read": len(ids) - 1, "answer_pos": -1})
                 continue
             if kind == "sham":
-                if english_left <= 0 or record.language != "en":
+                if not asked_sham[t]:
                     continue
-                english_left -= 1
                 wording, index = cfg.wording_sham, None
             elif kind.startswith("train_"):
                 index = train[record.key]
@@ -124,9 +170,13 @@ def scored_items(
             else:
                 index = held_out[record.key]
                 wording = cfg.wordings_held_out[index]
-            rendered = followup_text(tokenizer, record.messages, record.tools, wording)
-            ids, answer_pos = prefilled_ids(tokenizer, rendered, ANSWER_FOR_KIND[kind], answers)
-            yield {**common, "kind": kind, "wording": index, "ids": ids, "read": len(ids) - 1, "answer_pos": answer_pos}
+            rendered = followup_text(shared, record.messages, record.tools, wording)
+            ids, answer_pos = prefilled_ids(shared, rendered, ANSWER_FOR_KIND[kind], answers)
+            built.append({**common, "kind": kind, "wording": index, "ids": ids, "read": len(ids) - 1, "answer_pos": answer_pos})
+        return built
+
+    for built in map_tokenized(items_of, range(len(records)), tokenizer):
+        yield from built
 
 
 def choose_native(rows: Sequence[NativeRow], total: int, seed: int, salt: str) -> list[NativeRow]:
@@ -157,8 +207,8 @@ def choose_native(rows: Sequence[NativeRow], total: int, seed: int, salt: str) -
 
 
 def native_items(tokenizer: Any, rows: Sequence[NativeRow], max_tokens: int) -> Iterable[dict[str, Any]]:
-    for t, row in enumerate(rows):
-        ids = native_ids(tokenizer, row.messages, row.tools, row.completion)
+    tokenized = map_tokenized(lambda row, shared: native_ids(shared, row.messages, row.tools, row.completion), rows, tokenizer)
+    for t, (row, ids) in enumerate(zip(rows, tokenized)):
         yield {"t": t, "kind": "native", "y": row.label, "family": row.family, "group": row.group, "wording": None, "key": row.row, "ids": ids, "read": len(ids) - 1, "answer_pos": -1}
 
 
@@ -172,11 +222,13 @@ def build_rung_plan(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any) -> 
     # Native rows of probe-train families. Empty completions cannot be read, and long rows are dropped.
     usable_native = []
     native_drops = Counter()
-    for row in native:
-        if not row.completion:
-            native_drops["empty_completion"] += 1
-            continue
-        if len(native_ids(tokenizer, row.messages, row.tools, row.completion)) > sizes.max_tokens:
+    with_completion = [row for row in native if row.completion]
+    native_drops["empty_completion"] = len(native) - len(with_completion)
+    if not native_drops["empty_completion"]:
+        del native_drops["empty_completion"]
+    native_lengths = map_tokenized(lambda row, shared: len(native_ids(shared, row.messages, row.tools, row.completion)), with_completion, tokenizer)
+    for row, length in zip(with_completion, native_lengths):
+        if length > sizes.max_tokens:
             native_drops["too_long"] += 1
             continue
         usable_native.append(row)
@@ -273,14 +325,17 @@ def build_training_rows(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any,
     longest = max(cfg.wordings_train, key=len)
     base_keys: list[str] = []
     share = max(1, training.n_base_rows // max(1, 2 * len(adapter_families)))
+    all_english = [record for _family, records in sorted(adapter_families.items()) for record in records if record.language == "en"]
+    english_lengths = dict(zip((record.key for record in all_english), map_tokenized(lambda record, shared: followup_length(shared, record, longest), all_english, tokenizer)))
     for family, records in sorted(adapter_families.items()):
-        english = [record for record in records if record.language == "en" and followup_length(tokenizer, record, longest) + 1 <= training.max_tokens]
+        english = [record for record in records if record.language == "en" and english_lengths[record.key] + 1 <= training.max_tokens]
         base_keys.extend(record.key for record in select_balanced(english, share, cfg.seed, lambda record: record.y, f"adapter|{family}"))
     ordinary: list[str] = []
     rows = [row for row in read_native(paths.ordinary) if row.language == "en"]
+    row_lengths = map_tokenized(lambda row, shared: len(encode_ids(shared, render_conversation(shared, row.messages, row.tools))), rows, tokenizer)
     by_family: dict[str, list[NativeRow]] = defaultdict(list)
-    for row in rows:
-        if len(encode_ids(tokenizer, render_conversation(tokenizer, row.messages, row.tools))) + training.ordinary_answer_tokens <= training.max_tokens and row.completion.strip():
+    for row, length in zip(rows, row_lengths):
+        if length + training.ordinary_answer_tokens <= training.max_tokens and row.completion.strip():
             by_family[row.family].append(row)
     per_family = max(1, training.n_ordinary_rows // max(1, 2 * len(by_family)))
     for family, members in sorted(by_family.items()):
@@ -289,11 +344,16 @@ def build_training_rows(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any,
     # Half of ordinary chat is the same conversations answering the base turn itself: honest ones only, never teaching a lie.
     replies: list[str] = []
     for family, records in sorted(adapter_families.items()):
-        honest = [record for record in records if record.y == 0 and record.language == "en" and followup_length(tokenizer, record, longest) <= training.max_tokens]
+        honest = [record for record in records if record.y == 0 and record.language == "en" and english_lengths[record.key] <= training.max_tokens]
         honest.sort(key=lambda record: stable_hash(str(cfg.seed), "reply", record.key))
         replies.extend(record.key for record in honest[:per_family])
     plan = {"base_keys": base_keys, "ordinary_rows": ordinary, "reply_keys": replies}
     if not base_keys or not (ordinary or replies):
         raise ValueError("No rows to train adapters on")
+    # Only the rows named above, so that each training worker parses a few thousand rows and not the whole data set.
+    wanted = {*base_keys, *replies}
+    write_jsonl(paths.training_transcripts(tag), [record for records in adapter_families.values() for record in records if record.key in wanted])
+    wanted_rows = set(ordinary)
+    write_jsonl(paths.training_ordinary(tag), [row for row in rows if row.row in wanted_rows])
     atomic_write_bytes(paths.training_rows(tag), json.dumps(plan).encode("utf-8"))
     return {"base": len(base_keys), "ordinary": len(ordinary), "replies": len(replies)}

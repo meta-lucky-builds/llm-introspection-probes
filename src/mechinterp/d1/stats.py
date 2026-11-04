@@ -13,8 +13,10 @@ and a monitor with one threshold sees the pooled one.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -24,6 +26,21 @@ from .families import line_of_work
 Z_975 = 1.959964
 # Two-sided 95% Student t quantiles, by degrees of freedom. Enough for any number of lines of work this design can have.
 T_975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}
+MAX_ANALYSIS_THREADS = 16
+
+
+def parallel_map(function: Callable[[Any], Any], items: Iterable[Any]) -> list[Any]:
+    """function over items on threads, numpy dropping the GIL, with results in the items' order.
+
+    Each call is deterministic and independent of the others, and the weights are fixed before any of this, so the numbers
+    do not depend on the thread count. One item, the usual case for a point estimate, stays on this thread.
+    """
+    items = list(items)
+    threads = min(MAX_ANALYSIS_THREADS, os.cpu_count() or 1, len(items))
+    if threads <= 1:
+        return [function(item) for item in items]
+    with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="d1-analysis") as pool:
+        return list(pool.map(function, items))
 
 
 def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -42,16 +59,17 @@ def weighted_auroc(scores: np.ndarray, labels: np.ndarray, weights: np.ndarray, 
     ordered = scores[order]
     starts = np.flatnonzero(np.r_[True, ordered[1:] != ordered[:-1]])
     positive = labels[order]
-    results = []
-    for begin in range(0, len(weights), chunk):
+
+    def one_chunk(begin: int) -> np.ndarray:
         block = np.asarray(weights[begin : begin + chunk], dtype=np.float64)[:, order]
         tied_positive = np.add.reduceat(block * positive, starts, axis=1)
         tied_negative = np.add.reduceat(block * ~positive, starts, axis=1)
         below = np.cumsum(tied_negative, axis=1) - tied_negative
         numerator = (tied_positive * (below + 0.5 * tied_negative)).sum(axis=1)
         denominator = tied_positive.sum(axis=1) * tied_negative.sum(axis=1)
-        results.append(np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 0))
-    return np.concatenate(results)
+        return np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 0)
+
+    return np.concatenate(parallel_map(one_chunk, range(0, len(weights), chunk)))
 
 
 def threshold_at_fpr(negative_scores: np.ndarray, fpr: float = 0.01) -> float:

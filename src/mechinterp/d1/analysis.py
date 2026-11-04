@@ -37,7 +37,7 @@ from .paths import BASE_MODEL, D1Paths, adapter_id
 from .plan import read_meta
 from .probes import Ensemble, random_direction_probe
 from .sizing import allocate_per_class
-from .stats import Resampler, auroc, interval, interval_widening, plan_sample_size, recall_and_fpr, threshold_at_fpr, weighted_auroc
+from .stats import Resampler, auroc, interval, interval_widening, parallel_map, plan_sample_size, recall_and_fpr, threshold_at_fpr, weighted_auroc
 from .store import read_complete
 
 # The largest gap tolerated between the two arms' answer logits, which come from one prompt at different batch paddings.
@@ -395,7 +395,7 @@ def full_analysis(cfg: D1Config, paths: D1Paths, tag: str, attempt: int, thresho
             _check_aligned(base, arms[model])
 
     _step("linear probe scores")
-    linear_scores = {model: arm_scores(linear, model_arms) for model, model_arms in arms.items()}
+    linear_scores = dict(zip(arms, parallel_map(lambda model_arms: arm_scores(linear, model_arms), arms.values())))
     base_scores = arm_scores(linear, base)
     results: dict[str, Any] = {"rung": tag, "attempt": attempt, "seeds": seeds, "layers": linear.layers, "calibration": cal.to_dict()}
     results["n_transcripts"] = int(len(y))
@@ -503,7 +503,7 @@ def full_analysis(cfg: D1Config, paths: D1Paths, tag: str, attempt: int, thresho
     }
     # 5. MLP ensemble.
     _step("secondary comparison 5, the MLP ensemble")
-    mlp_scores = {model: arm_scores(mlp, model_arms) for model, model_arms in arms.items()}
+    mlp_scores = dict(zip(arms, parallel_map(lambda model_arms: arm_scores(mlp, model_arms), arms.values())))
     results["secondary_5_mlp"] = {
         **d_from(condition_scores("DD", "contrast", mlp_scores, cal_mlp), condition_scores("SHAM", "contrast", mlp_scores, cal_mlp), y, resampler),
         "unmodified_auroc": auroc(_signed(arm_scores(mlp, base)["contrast"], cal_mlp.signs["contrast"]), y),
@@ -635,16 +635,19 @@ def baselines(
         decision = classifier.decision(transcript_text(by_key[key].messages) for key in keys)
         text_auroc = auroc(decision, y)
     # Random directions, each with its own sign from calibration, as the real probe has.
-    random_aurocs, random_d = [], []
-    for draw in range(cfg.analysis.n_random_directions):
+    def random_direction_draw(draw: int) -> tuple[float, float]:
+        """Each draw has its own seed and touches nothing shared, so they can run at once."""
         probe = random_direction_probe(linear, cfg.analysis.seed + draw)
         own = calibrate(probe, base_cal)
         sign = own.signs["contrast"]
-        random_aurocs.append(auroc(sign * arm_scores(probe, base)["contrast"], y))
         differences = []
         for dd_model, sham_model in zip(ids["DD"], ids["SHAM"]):
             differences.append(auroc(sign * arm_scores(probe, arms[dd_model])["contrast"], y) - auroc(sign * arm_scores(probe, arms[sham_model])["contrast"], y))
-        random_d.append(median(differences))
+        return auroc(sign * arm_scores(probe, base)["contrast"], y), median(differences)
+
+    draws = parallel_map(random_direction_draw, range(cfg.analysis.n_random_directions))
+    random_aurocs = [draw[0] for draw in draws]
+    random_d = [draw[1] for draw in draws]
     # Label-shuffled probe: every layer, since the layer rule would rightly drop them all.
     shuffled_sign = cal_shuffled.signs["contrast"]
     shuffled_d = [

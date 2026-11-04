@@ -7,6 +7,8 @@ blocks' linear layers, so block outputs seen here are always through the adapter
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from ..scoring import assert_finite
 from .store import CaptureStore
 
 FLUSH_SECONDS = 30.0
+WRITE_QUEUE = 4  # Batches waiting for the disk. Bounded, so a slow disk slows capture and cannot fill RAM.
 
 
 @dataclass(frozen=True)
@@ -92,11 +95,14 @@ def forward_batch(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Right-padded with an attention mask. Returns (activations [batch, layers, d], log probs [batch, 2], NaN where unused)."""
     width = max(len(item.ids) for item in items)
-    input_ids = torch.full((len(items), width), pad, dtype=torch.long, device=device)
-    attention = torch.zeros_like(input_ids)
+    # Built on the CPU and sent once, rather than one small transfer per row. The same integers either way.
+    ids_array = np.full((len(items), width), pad, dtype=np.int64)
+    mask_array = np.zeros((len(items), width), dtype=np.int64)
     for row, item in enumerate(items):
-        input_ids[row, : len(item.ids)] = torch.tensor(item.ids, device=device)
-        attention[row, : len(item.ids)] = 1
+        ids_array[row, : len(item.ids)] = item.ids
+        mask_array[row, : len(item.ids)] = 1
+    input_ids = torch.from_numpy(ids_array).to(device)
+    attention = torch.from_numpy(mask_array).to(device)
     positions = {"read": torch.tensor([item.read for item in items])}
     body, head = body_and_head(model)
     with torch.inference_mode(), gather_at(chosen, positions) as captured:
@@ -121,6 +127,77 @@ def is_out_of_memory(error: BaseException) -> bool:
     return isinstance(error, torch.cuda.OutOfMemoryError) or (isinstance(error, RuntimeError) and "out of memory" in str(error).lower())
 
 
+class RowWriter:
+    """Converts, writes and flushes rows on its own thread, so the GPU is not left waiting on the disk.
+
+    Rows are addressed by index, so the order of writes changes nothing. A row counts as done only after its data is flushed,
+    as before. An error here, such as an overflow, stops the capture at its next batch, and close() always flushes what was
+    written, so finished rows survive.
+    """
+
+    def __init__(self, store: CaptureStore, total: int, heartbeat: Callable[[int, int, float], None] | None) -> None:
+        self.store = store
+        self.total = total
+        self.heartbeat = heartbeat
+        self.waiting: queue.Queue = queue.Queue(maxsize=WRITE_QUEUE)
+        self.error: BaseException | None = None
+        self.finished = 0
+        self.tokens = 0
+        self.worst = 0.0
+        self.started = time.monotonic()
+        self.thread = threading.Thread(target=self._loop, name="d1-row-writer", daemon=True)
+        self.thread.start()
+
+    def put(self, rows: list[int], acts: np.ndarray, logprobs: np.ndarray, tokens: int) -> None:
+        if self.error is not None:
+            raise self.error
+        self.waiting.put((rows, acts, logprobs, tokens))
+
+    def _flush(self, rows: list[int]) -> None:
+        self.store.mark_done(rows)
+        if self.heartbeat is not None:
+            self.heartbeat(self.finished, self.total, self.tokens / max(1e-6, time.monotonic() - self.started))
+
+    def _loop(self) -> None:
+        unflushed: list[int] = []
+        last_flush = time.monotonic()
+        while True:
+            entry = self.waiting.get()
+            if entry is None:
+                break
+            if self.error is not None:
+                continue  # Keeps draining, so that put() can never block on a dead writer.
+            rows, acts, logprobs, tokens = entry
+            try:
+                self.worst = max(self.worst, self.store.write(rows, acts, logprobs))
+                unflushed.extend(rows)
+                self.finished += len(rows)
+                self.tokens += tokens
+                if time.monotonic() - last_flush >= FLUSH_SECONDS:
+                    self._flush(unflushed)
+                    unflushed = []
+                    last_flush = time.monotonic()
+            except BaseException as error:  # Handed to the main thread, which is the one that can stop the task.
+                self.error = error
+        if unflushed and self.error is None:
+            try:
+                self._flush(unflushed)
+            except BaseException as error:
+                self.error = error
+        elif unflushed:
+            # The rows that were written before the error are good, and keeping them saves redoing them.
+            try:
+                self.store.mark_done(unflushed)
+            except BaseException:
+                pass
+
+    def close(self) -> None:
+        self.waiting.put(None)
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+
+
 def run_capture(
     model: nn.Module,
     layer_indices: Sequence[int],
@@ -134,45 +211,42 @@ def run_capture(
     shard: int = 0,
     n_shards: int = 1,
     heartbeat: Callable[[int, int, float], None] | None = None,
+    rows: Sequence[int] | None = None,
 ) -> dict[str, float]:
-    """Capture every pending row of this shard. Safe to call again: finished rows are skipped."""
-    pending = store.pending(shard, n_shards)
+    """Capture every pending row of this shard, or of `rows` if given. Safe to call again: finished rows are skipped."""
+    pending = store.pending(shard, n_shards) if rows is None else store.pending_of(rows)
     if not pending:
         return {"rows": 0, "tokens": 0, "max_relative_rounding": 0.0}
     items = read_items(items_path, pending)
     lengths = {row: len(items[row].ids) for row in pending}
     blocks = get_layers(model)
     chosen = {layer: blocks[layer] for layer in layer_indices}
-    done_rows: list[int] = []
-    finished = tokens = 0
-    worst = 0.0
-    started = last_flush = time.monotonic()
     budget = token_budget
-    queue = make_batches(lengths, budget)
-    while queue:
-        batch = queue.pop(0)
+    batches = make_batches(lengths, budget)
+    writer = RowWriter(store, len(pending), heartbeat)
+    try:
+        while batches:
+            batch = batches.pop(0)
+            try:
+                acts, logprobs = forward_batch(model, chosen, [items[row] for row in batch], yes, no, pad, device)
+            except Exception as error:
+                if not is_out_of_memory(error):
+                    raise
+                if len(batch) == 1:
+                    # Worded so the worker reports this as out of memory: the pool makes room on the card and tries again.
+                    raise RuntimeError(f"Out of memory: a single row of {lengths[batch[0]]} tokens does not fit on this GPU right now") from error
+                torch.cuda.empty_cache()
+                budget = max(1, budget // 2)
+                print(f"Out of GPU memory, so lowering the token budget to {budget}", flush=True)
+                remaining = {row: lengths[row] for chunk in [batch, *batches] for row in chunk}
+                batches = make_batches(remaining, budget)
+                continue
+            writer.put(batch, acts, logprobs, sum(lengths[row] for row in batch))
+    except BaseException:
         try:
-            acts, logprobs = forward_batch(model, chosen, [items[row] for row in batch], yes, no, pad, device)
-        except Exception as error:
-            if not is_out_of_memory(error):
-                raise
-            if len(batch) == 1:
-                raise RuntimeError(f"A single row of {lengths[batch[0]]} tokens does not fit on this GPU") from error
-            torch.cuda.empty_cache()
-            budget = max(1, budget // 2)
-            print(f"Out of GPU memory, so lowering the token budget to {budget}", flush=True)
-            remaining = {row: lengths[row] for chunk in [batch, *queue] for row in chunk}
-            queue = make_batches(remaining, budget)
-            continue
-        worst = max(worst, store.write(batch, acts, logprobs))
-        done_rows.extend(batch)
-        finished += len(batch)
-        tokens += sum(lengths[row] for row in batch)
-        now = time.monotonic()
-        if now - last_flush >= FLUSH_SECONDS or not queue:
-            store.mark_done(done_rows)
-            done_rows = []
-            last_flush = now
-            if heartbeat is not None:
-                heartbeat(finished, len(pending), tokens / max(1e-6, now - started))
-    return {"rows": finished, "tokens": tokens, "max_relative_rounding": worst}
+            writer.close()
+        except BaseException as error:
+            print(f"The row writer also failed: {error}", flush=True)
+        raise
+    writer.close()
+    return {"rows": writer.finished, "tokens": writer.tokens, "max_relative_rounding": writer.worst}

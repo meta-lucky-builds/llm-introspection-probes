@@ -67,6 +67,13 @@ class D1Paths:
     def training_rows(self, tag: str) -> Path:
         return self.plan_dir(tag) / "training_rows.json"
 
+    def training_transcripts(self, tag: str) -> Path:
+        """Only the transcripts adapters train on, so a training worker need not parse every row of the data."""
+        return self.plan_dir(tag) / "training_transcripts.jsonl"
+
+    def training_ordinary(self, tag: str) -> Path:
+        return self.plan_dir(tag) / "training_ordinary.jsonl"
+
     def capture_dir(self, tag: str, model_id: str, name: str) -> Path:
         return self.rung_dir(tag) / "captures" / model_id / name
 

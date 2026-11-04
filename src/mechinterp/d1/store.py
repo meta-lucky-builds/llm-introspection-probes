@@ -94,9 +94,32 @@ class CaptureStore:
     def pending(self, shard: int = 0, n_shards: int = 1) -> list[int]:
         return [index for index in np.flatnonzero(self.done == 0).tolist() if index % n_shards == shard]
 
+    def pending_of(self, rows: Sequence[int]) -> list[int]:
+        """Which of these rows are not done yet, in the order given."""
+        return [row for row in rows if self.done[row] == 0]
+
     @property
     def complete(self) -> bool:
         return bool(np.all(self.done == 1))
+
+
+def assign_shards(lengths: Sequence[int], n_shards: int) -> list[list[int]]:
+    """Each shard's rows: longest first, neighbours by length, with about equal tokens. Every row is in exactly one shard.
+
+    A pure function of the set and the shard count, and the count comes from the set's tokens and never from the number of
+    GPUs. So a row's batch does not depend on how many workers there are or in what order they take the shards. Neighbours by
+    length also waste almost nothing on padding.
+    """
+    if n_shards < 1:
+        raise ValueError("n_shards must be at least 1")
+    order = sorted(range(len(lengths)), key=lambda row: (-lengths[row], row))
+    total = max(1, sum(lengths))
+    shards: list[list[int]] = [[] for _ in range(n_shards)]
+    spent = 0
+    for row in order:
+        shards[min(n_shards - 1, spent * n_shards // total)].append(row)
+        spent += lengths[row]
+    return shards
 
 
 def read_complete(directory: Path) -> CaptureStore:

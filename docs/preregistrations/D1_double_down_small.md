@@ -91,6 +91,11 @@ We expect G2 is the main risk: AISI's note on confession LoRAs suggests poor gen
 ## Change log
 All entries below were made before any D1 data was collected. The README section "D1" lists every implementation choice.
 
+2026-11-04, parallel execution, on the owner's request, before any data. The science is unchanged:
+- **Speculative seeds and reads.** Other DD and SHAM seeds and probe reads may start before the first seed's G2 result, and are cancelled if it fails. Verdicts use only what the gates allow. FLIP and HONEST still wait for all DD and SHAM seeds to pass G2.
+- **Overlap.** Base reads may overlap adapter training.
+- **Machine-dependent settings.** Gradient checkpointing and capture token budget are chosen from measurement on the machine. They affect speed, and adapters are not guaranteed bit-identical across runs because GPU nondeterminism remains; each run records what was used.
+
 2026-11-04, scope set by the owner before any data: **Qwen3-1.7B only.** The ladder has one rung, in config `qwen3_1_7b.json`. If G1 fails at 1.7B, the run ends with the finding that this probe recipe is not reliable at 1.7B. That says nothing about 4B and above, unlike the original "not reliable through 14B", and the bar is not lowered. `full.json` keeps the whole ladder if the owner later scales up.
 
 2026-11-04, design corrections after independent review ([review](../reviews/D1_review.md)). These override the text above where they conflict:

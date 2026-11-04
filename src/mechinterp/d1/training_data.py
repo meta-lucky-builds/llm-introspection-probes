@@ -17,8 +17,9 @@ This file imports nothing from probes, capture or analysis, and a test checks th
 from __future__ import annotations
 
 import random
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from ..prompts import encode_ids
 from .config import CONDITIONS, D1Config
@@ -136,6 +137,31 @@ class BatchBuilder:
     def batch(self, step: int) -> list[tuple[list[int], list[int]]]:
         slots = step_schedule(self.seed, step, self.cfg, len(self.positives), len(self.negatives), len(self.ordinary), len(self.replies))
         return [self.row(slot) for slot in slots]
+
+
+class PrefetchedBatches:
+    """Tokenizes the next few steps on one background thread, so the GPU does not wait for the tokenizer.
+
+    The wrapped function is pure in the step, so a batch is the same whichever thread built it and whenever. Only that one
+    thread touches the tokenizer. A step the worker jumps to, as on a resume, is simply built on demand.
+    """
+
+    def __init__(self, batch: Callable[[int], Any], depth: int = 8) -> None:
+        self.batch = batch
+        self.depth = depth
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="d1-batches")
+        self.futures: dict[int, Future] = {}
+
+    def __call__(self, step: int) -> Any:
+        for ahead in range(step, step + self.depth):
+            if ahead not in self.futures:
+                self.futures[ahead] = self.executor.submit(self.batch, ahead)
+        for old in [key for key in self.futures if key < step]:
+            self.futures.pop(old).cancel()
+        return self.futures.pop(step).result()
+
+    def close(self) -> None:
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def check_answer_tokens(tokenizer: Any, prompt: str, answers: AnswerTokens) -> None:

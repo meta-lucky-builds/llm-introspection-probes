@@ -99,8 +99,8 @@ def builder_for_condition(cfg: D1Config, paths: D1Paths, tag: str, condition: st
     from .training_data import BatchBuilder
 
     plan = json.loads(paths.training_rows(tag).read_text(encoding="utf-8"))
-    transcripts = {record.key: record for record in read_transcripts(paths.transcripts)}
-    ordinary_rows = {row.row: row for row in read_native(paths.ordinary)}
+    transcripts = {record.key: record for record in read_transcripts(paths.training_transcripts(tag))}
+    ordinary_rows = {row.row: row for row in read_native(paths.training_ordinary(tag))}
     return BatchBuilder(
         tokenizer, cfg, condition, seed,
         [transcripts[key] for key in plan["base_keys"]],
@@ -110,21 +110,43 @@ def builder_for_condition(cfg: D1Config, paths: D1Paths, tag: str, condition: st
     )  # fmt: skip
 
 
+class LoadedModel:
+    """Keeps one rung's model for a worker that serves many capture shards, so that fine shards cost no reloads.
+
+    A model is only ever read through. An adapter is a set of hooks that leave nothing behind, which task_capture checks after
+    every job, so a read of the unmodified model after an adapter's is the same as one in a new process.
+    """
+
+    def __init__(self) -> None:
+        self.tag: str | None = None
+        self.value: tuple[Any, Any, Any] | None = None
+
+    def get(self, rung: Rung, factory: str | None, require_cuda: bool) -> tuple[Any, Any, Any]:
+        if self.tag != rung.tag or self.value is None:
+            self.value = None
+            self.value = load_model(rung, factory, require_cuda)
+            self.tag = rung.tag
+        return self.value
+
+
 def task_capture(
-    cfg: D1Config, paths: D1Paths, tag: str, model_id: str, sets: Sequence[str], shard: int, n_shards: int, task_name: str, factory: str | None, require_cuda: bool
-) -> None:
+    cfg: D1Config, paths: D1Paths, tag: str, model_id: str, sets: Sequence[str], shard: int, n_shards: int, task_name: str, factory: str | None, require_cuda: bool,
+    token_budget: int | None = None, loaded: LoadedModel | None = None,
+) -> None:  # fmt: skip
     from .capture import run_capture
-    from .lora import LoraAdapter
-    from .store import CaptureStore
+    from .lora import LoraAdapter, named_block_linears
+    from .plan import read_meta
+    from .store import CaptureStore, assign_shards
 
     rung = cfg.rung(tag)
-    model, tokenizer, device = load_model(rung, factory, require_cuda)
+    model, tokenizer, device = loaded.get(rung, factory, require_cuda) if loaded is not None else load_model(rung, factory, require_cuda)
     answers = answer_tokens(paths, tag)
     layers = layers_for(cfg.fractions, rung.n_layers)
     pad = tokenizer.eos_token_id
     beat = Beat(paths, task_name)
     stores = {name: CaptureStore.open(paths.capture_dir(tag, model_id, name)) for name in sets}
-    grand_total = sum(len(store.pending(shard, n_shards)) for store in stores.values())
+    rows_of = {name: assign_shards(read_meta(paths, tag, name)["lengths"], n_shards)[shard] for name in sets}
+    grand_total = sum(len(stores[name].pending_of(rows_of[name])) for name in sets)
     done_before = 0
     beat(0, grand_total, 0.0, loaded=True)
     adapter = None
@@ -137,7 +159,7 @@ def task_capture(
         def report(done: int, total: int, rate: float) -> None:
             beat(done_before + done, grand_total, rate, loaded=True, current=name)
 
-        info = run_capture(model, layers, paths.set_items(tag, name), stores[name], answers.yes, answers.no, pad, device, cfg.capture_token_budget, shard, n_shards, report)
+        info = run_capture(model, layers, paths.set_items(tag, name), stores[name], answers.yes, answers.no, pad, device, token_budget or cfg.capture_token_budget, heartbeat=report, rows=rows_of[name])
         done_before += int(info["rows"])
         print(f"{model_id}/{name} shard {shard}: {info}", flush=True)
 
@@ -148,12 +170,18 @@ def task_capture(
         with adapter.applied(model):
             for name in sets:
                 capture_one(name)
+    left_behind = [name for name, module in named_block_linears(model).items() if len(module._forward_hooks) > 0]
+    if left_behind:
+        raise FatalTaskError(f"An adapter's hooks stayed on {left_behind[:3]}, so the next read on this model would not be what it says")
 
 
-def task_train(cfg: D1Config, paths: D1Paths, tag: str, condition: str, seed: int, attempt: int, task_name: str, factory: str | None, require_cuda: bool, in_process: bool) -> None:
+def task_train(
+    cfg: D1Config, paths: D1Paths, tag: str, condition: str, seed: int, attempt: int, task_name: str, factory: str | None, require_cuda: bool, in_process: bool,
+    gradient_checkpointing: bool = True, halve_on_oom: bool = False,
+) -> None:  # fmt: skip
     from .lora import LoraAdapter, train_adapter
     from .prompts import followup_text
-    from .training_data import check_answer_tokens
+    from .training_data import PrefetchedBatches, check_answer_tokens
 
     if condition not in CONDITIONS:
         raise FatalTaskError(f"Unknown condition {condition}")
@@ -175,10 +203,15 @@ def task_train(cfg: D1Config, paths: D1Paths, tag: str, condition: str, seed: in
     def report(done: int, total: int, rate: float) -> None:
         beat(done, total, rate, loaded=True)
 
-    info = train_adapter(
-        model, adapter, builder.batch, steps, training.micro_batch, training.learning_rate, training.warmup_steps,
-        tokenizer.eos_token_id, device, directory / "resume.pt", heartbeat=report, check_imports=not in_process,
-    )  # fmt: skip
+    batches = PrefetchedBatches(builder.batch)
+    try:
+        info = train_adapter(
+            model, adapter, batches, steps, training.micro_batch, training.learning_rate, training.warmup_steps,
+            tokenizer.eos_token_id, device, directory / "resume.pt", heartbeat=report, check_imports=not in_process,
+            gradient_checkpointing=gradient_checkpointing, halve_on_oom=halve_on_oom,
+        )  # fmt: skip
+    finally:
+        batches.close()
     metadata = {"condition": condition, "seed": seed, "attempt": attempt, "rung": tag, **info}
     adapter.save(directory / "adapter.pt", {key: value for key, value in metadata.items() if key in ("condition", "seed", "attempt", "rung", "steps")})
     atomic_write_bytes(directory / "training.json", json.dumps(metadata, indent=1).encode("utf-8"))

@@ -189,8 +189,15 @@ def train_adapter(
     heartbeat: Callable[[int, int, float], None] | None = None,
     grad_clip: float = 1.0,
     check_imports: bool = True,
+    gradient_checkpointing: bool = True,
+    halve_on_oom: bool = True,
 ) -> dict[str, Any]:
-    """Fit the adapter's parameters. `batches(step)` must be a pure function of the step, which is what allows resume."""
+    """Fit the adapter's parameters. `batches(step)` must be a pure function of the step, which is what allows resume.
+
+    Gradient checkpointing computes the same numbers, since no dropout runs here, at the cost of another forward pass. So
+    it can be left off when the card has the memory. With halve_on_oom off, running out of memory ends the process instead
+    of changing the micro-batch, so the pool can make room and the adapter's rounding stays the same as on an empty card.
+    """
     assert_no_probe_in_loss(model, check_imports)
     if any(parameter.requires_grad for parameter in model.parameters()):
         raise ValueError("The base model must be frozen before adapter training")
@@ -207,7 +214,10 @@ def train_adapter(
         losses = list(state["losses"])
     model.train()
     if getattr(model, "gradient_checkpointing_enable", None) is not None and getattr(model, "supports_gradient_checkpointing", False):
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        if gradient_checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        else:
+            model.gradient_checkpointing_disable()
     started = time.monotonic()
     size = micro_batch
     with adapter.applied(model):
@@ -227,7 +237,7 @@ def train_adapter(
                         total += float(loss.detach())
                     break
                 except Exception as error:
-                    if not (isinstance(error, torch.cuda.OutOfMemoryError) or "out of memory" in str(error).lower()) or size == 1:
+                    if not (isinstance(error, torch.cuda.OutOfMemoryError) or "out of memory" in str(error).lower()) or size == 1 or not halve_on_oom:
                         raise
                     size = max(1, size // 2)
                     optimizer.zero_grad(set_to_none=True)

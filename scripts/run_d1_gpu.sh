@@ -21,6 +21,8 @@
 #   D1_REANALYZE        Set to 1 on a run that ended as DONE, after a fix to analysis code or the analysis config:
 #                       recomputes gates and the report from stored numbers, with no GPU work, and rewrites the results
 #   D1_STALL_MINUTES    Kill a loaded worker after this long with no progress. Default 30
+#   D1_WORKERS_PER_GPU  Workers per card, as a number. Default: free memory says what fits, and measured utilization
+#                       says whether another worker would help. Two workers on one card take turns, so more is not faster
 #   D1_CONFIG           Config file. Default: experiments/d1_double_down/configs/qwen3_1_7b.json. full.json has the whole ladder
 #   D1_STATE_DIR        Checkpoints, venv, model cache and results. Default: /workspace/d1_double_down if
 #                       /workspace is writable, otherwise .d1_state/ inside the clone
@@ -625,13 +627,15 @@ DOWNLOAD
 
 run_stages() {
   say "Step 5 of 7: running every stage on $N_GPUS GPU(s). The data check comes first. Each model starts with its dry-run checks, printed as PASS or FAIL."
-  say "  Progress and a stage ETA are printed about once a minute. A worker with no progress for $STALL_MINUTES minutes is killed."
+  say "  Progress per GPU and an ETA are printed about once a minute. A worker with no progress for $STALL_MINUTES minutes is killed. A GPU idle for over a minute while work is pending is warned about, with the reason."
   local code=0 idle
+  local workers_per_gpu=()
+  if [[ -n "${D1_WORKERS_PER_GPU:-}" ]]; then workers_per_gpu=(--workers-per-gpu "$D1_WORKERS_PER_GPU"); fi
   # The orchestrator prints every minute, and handles wedged workers itself. This covers the orchestrator.
   idle=$((${STALL_MINUTES%%.*} * 120 + 300))
   bounded "$RUN_MAX_SECONDS:$idle" "$PY" -u -m mechinterp.d1.cli run --config "$CONFIG" --out "$RUN_DIR" --devices "$GPU_LIST" \
     --gpu-free-gb "$((GPU_FREE_MIB / 1024))" --load-slots "$LOAD_SLOTS" --threads-per-worker "$THREADS_PER_WORKER" \
-    --stall-minutes "$STALL_MINUTES" </dev/null || code=$?
+    --stall-minutes "$STALL_MINUTES" "${workers_per_gpu[@]}" </dev/null || code=$?
   if [[ "$code" -eq 1 && -f "$FAILURE_REASON_FILE" ]]; then
     die "$(cat "$FAILURE_REASON_FILE")"
   fi

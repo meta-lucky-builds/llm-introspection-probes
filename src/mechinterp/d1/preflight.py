@@ -240,12 +240,17 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
         builder.batch(0)  # A real mixed batch of each condition has to build, for this tokenizer and these rows.
     builder.condition = "DD"
     train_rows = [builder.row(Slot("manipulation", index, wording)) for index in longest]
+    # One step first, because the first step of a process pays for its allocations, and the comparison below should not.
+    train_adapter(model, LoraAdapter.for_model(model, training.rank, training.alpha, 0), lambda _step: train_rows, 1, training.micro_batch, training.learning_rate, training.warmup_steps, pad, device, check_imports=False)
     throwaway = LoraAdapter.for_model(model, training.rank, training.alpha, 0)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     started = time.monotonic()
     info = train_adapter(model, throwaway, lambda _step: train_rows, 2, training.micro_batch, training.learning_rate, training.warmup_steps, pad, device, check_imports=False)
     seconds_per_step = (time.monotonic() - started) / 2.0
+    if device.type == "cuda":
+        measured["train_peak_gpu_gb"] = torch.cuda.max_memory_allocated() / 1e9
+        print(f"NOTE  Training peaked at {measured['train_peak_gpu_gb']:.1f} GB of GPU memory on the longest rows", flush=True)
     disable = getattr(model, "gradient_checkpointing_disable", None)
     if disable is not None and getattr(model, "supports_gradient_checkpointing", False):
         disable()
@@ -253,6 +258,26 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     longest_tokens = max(len(row[0]) for row in train_rows)
     check("Two real training steps run on the longest rows and move the adapter", bool(np.isfinite(info["final_loss"])) and info["delta_norm"] > 0.0, f"{seconds_per_step:.1f} s per step, longest row {longest_tokens} tokens, loss {info['final_loss']:.3f}")
     measured["train_seconds_per_step_on_longest_rows"] = seconds_per_step
+    # The same steps without gradient checkpointing, which saves a forward pass if the memory is there. Decides how training runs, never what it computes.
+    plain = LoraAdapter.for_model(model, training.rank, training.alpha, 0)
+    try:
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        started = time.monotonic()
+        train_adapter(model, plain, lambda _step: train_rows, 2, training.micro_batch, training.learning_rate, training.warmup_steps, pad, device, check_imports=False, gradient_checkpointing=False, halve_on_oom=False)
+        measured["train_seconds_per_step_no_checkpointing"] = (time.monotonic() - started) / 2.0
+        if device.type == "cuda":
+            measured["train_peak_gpu_gb_no_checkpointing"] = torch.cuda.max_memory_allocated() / 1e9
+        print(f"NOTE  Without gradient checkpointing: {measured['train_seconds_per_step_no_checkpointing']:.1f} s per step, peak {measured.get('train_peak_gpu_gb_no_checkpointing', 0.0):.1f} GB", flush=True)
+    except Exception as error:
+        if not is_out_of_memory(error):
+            raise
+        print("NOTE  Training without gradient checkpointing does not fit on this card on the longest rows, so it will stay on.", flush=True)
+    del plain
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     throwaway.requires_grad_(False)
     with throwaway.applied(model):
         direct, _ = forward_batch(model, chosen, items[:1], answers.yes, answers.no, pad, device)
@@ -264,17 +289,20 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     round_trip.unlink(missing_ok=True)
     check("A saved adapter gives the same reads when loaded", float(np.abs(direct - reloaded).max()) / scale < REPEAT_TOLERANCE, f"{float(np.abs(direct - reloaded).max()):.2e}")
     del throwaway, loaded
-    if device.type == "cuda":
-        measured["train_peak_gpu_gb"] = torch.cuda.max_memory_allocated() / 1e9
-        print(f"NOTE  Training peaked at {measured['train_peak_gpu_gb']:.1f} GB of GPU memory on the longest rows", flush=True)
     check("The base weights did not move in training", parameters_hash(model) == before)
 
     lengths = {row: len(item.ids) for row, item in fit_items.items()}
     first_batch = make_batches(lengths, cfg.capture_token_budget)[0]
     try:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            measured["weights_gpu_gb"] = torch.cuda.memory_allocated() / 1e9
+            torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
         largest_acts, _ = forward_batch(model, chosen, [fit_items[row] for row in first_batch], answers.yes, answers.no, pad, device)
         capture_speed = sum(lengths[row] for row in first_batch) / max(time.monotonic() - started, 1e-6)
+        if device.type == "cuda":
+            measured["capture_peak_gpu_gb"] = torch.cuda.max_memory_allocated() / 1e9
         check("Activations on the longest fit rows fit float16", float(np.abs(largest_acts).max()) < 65504.0 / 4, f"largest {float(np.abs(largest_acts).max()):.1f}")
         measured["tokens_per_second_on_longest_rows"] = capture_speed
     except Exception as error:

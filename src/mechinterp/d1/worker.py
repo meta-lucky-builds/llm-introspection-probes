@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Sequence
@@ -23,6 +26,7 @@ from .paths import BASE_MODEL, D1Paths
 from .produce import FatalTaskError, answer_tokens, load_model, load_tokenizer, task_capture, task_train
 
 EXIT_FATAL = 3
+EXIT_OUT_OF_MEMORY = 4  # Not a crash. The pool makes room on the card and tries the task again.
 __all__ = ["answer_tokens", "load_model", "main"]
 
 
@@ -101,6 +105,41 @@ def task_fit_probes(cfg: D1Config, paths: D1Paths, tag: str, name: str, source: 
     print(f"Probe {name}: retained {probe.retained.tolist()}, losses {probe.train_loss.round(3).tolist()}, {probe.info}", flush=True)
 
 
+def serve_capture(cfg: D1Config, paths: D1Paths, parser: argparse.ArgumentParser) -> None:
+    """Capture jobs from stdin, one JSON argument list per line, on one loaded model, until stdin closes.
+
+    A finished job's marker is written here, after its rows are flushed, and only then is the next line read. Any failure
+    leaves through main() with an exit code, ending this worker, so the pool sees exactly one unfinished job to put back.
+    """
+    from .produce import LoadedModel
+
+    loaded = LoadedModel()
+    for line in iter(sys.stdin.readline, ""):
+        if not line.strip():
+            continue
+        job = parser.parse_args(json.loads(line))
+        if job.task != "capture":
+            raise FatalTaskError(f"A capture worker cannot run {job.task}")
+        sets = [name for name in job.sets.split(",") if name]
+        task_capture(cfg, paths, job.rung, job.model_id, sets, job.shard, job.n_shards, job.task_name, job.factory, job.require_cuda, job.token_budget, loaded)
+        marker = paths.done(job.task_name)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+
+
+def exit_with_parent() -> None:
+    """A worker whose orchestrator died must not keep a GPU, or write beside the workers of the next launch."""
+    parent = os.getppid()
+
+    def watch() -> None:
+        while os.getppid() == parent:
+            time.sleep(5.0)
+        print("The orchestrator is gone, so this worker is stopping. A resume redoes what was not finished.", flush=True)
+        os._exit(EXIT_FATAL)
+
+    threading.Thread(target=watch, name="d1-parent-watch", daemon=True).start()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mechinterp.d1 worker")
     parser.add_argument("task")
@@ -124,11 +163,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-dir")
     parser.add_argument("--in-process", action="store_true")
     parser.add_argument("--n-workers", type=int, default=1)
+    parser.add_argument("--token-budget", type=int, default=None)
+    parser.add_argument("--gradient-checkpointing", type=int, default=1)
+    parser.add_argument("--halve-on-oom", action="store_true")
     args = parser.parse_args(argv)
     cfg = D1Config.from_file(args.config)
     paths = D1Paths(Path(args.out))
     try:
-        if args.task == "prepare":
+        if args.task == "serve":
+            serve_capture(cfg, paths, parser)
+        elif args.task == "prepare":
             task_prepare(cfg, paths, args.source_dir)
         elif args.task == "plan":
             task_plan(cfg, paths, args.rung, args.factory)
@@ -136,11 +180,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             task_test_set(cfg, paths, args.rung, args.factory)
         elif args.task == "capture":
             sets = [name for name in args.sets.split(",") if name]
-            task_capture(cfg, paths, args.rung, args.model_id, sets, args.shard, args.n_shards, args.task_name, args.factory, args.require_cuda)
+            task_capture(cfg, paths, args.rung, args.model_id, sets, args.shard, args.n_shards, args.task_name, args.factory, args.require_cuda, args.token_budget)
         elif args.task == "fit-probes":
             task_fit_probes(cfg, paths, args.rung, args.name, args.source, args.kind, args.shuffle, args.require_cuda)
         elif args.task == "train":
-            task_train(cfg, paths, args.rung, args.condition, args.seed, args.attempt, args.task_name, args.factory, args.require_cuda, args.in_process)
+            task_train(cfg, paths, args.rung, args.condition, args.seed, args.attempt, args.task_name, args.factory, args.require_cuda, args.in_process, bool(args.gradient_checkpointing), args.halve_on_oom)
         elif args.task == "preflight":
             from .preflight import run_preflight
 
@@ -157,10 +201,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .store import ActivationOverflow
 
         traceback.print_exc()
+        if isinstance(error, RuntimeError) and "out of memory" in str(error).lower():
+            return EXIT_OUT_OF_MEMORY
         fatal = (AnswerTokenError, CountMismatch, UnknownSource, ActivationOverflow, ValueError, AssertionError, SyntaxError, ImportError)
         return EXIT_FATAL if isinstance(error, fatal) else 1
     return 0
 
 
 if __name__ == "__main__":
+    exit_with_parent()
     sys.exit(main())
