@@ -6,3 +6,4 @@ build/
 dist/
 results/
 .venv/
+.e1_state/

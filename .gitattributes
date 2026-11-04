@@ -1,0 +1,3 @@
+# This repo is edited on Windows. Shell scripts must keep LF or bash fails on the machine that runs them.
+* text=auto
+*.sh text eol=lf

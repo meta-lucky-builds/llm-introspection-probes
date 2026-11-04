@@ -7,6 +7,7 @@ ever padded and the "last real token" is always index -1.
 
 from __future__ import annotations
 
+import gc
 import math
 import os
 import platform
@@ -25,10 +26,12 @@ from .design import (
     PHASE_IMPACT,
     PHASE_SCREEN,
     PHASE_TEST,
+    SHAM_TOLERANCE,
     Selection,
     Stimuli,
     Trial,
     assert_trial_respects_split,
+    clean_store_key,
     load_data,
     plan_clean_keys,
     plan_grid_trials,
@@ -70,7 +73,6 @@ from .vectors import concept_vectors, fingerprints_match, random_unit_vector, ve
 
 CleanKey = tuple[str, str, "int | None"]
 NONE_TASK = "T_inj_none"
-SHAM_TOLERANCE = 1e-4
 SECONDS_BETWEEN_PROGRESS_LINES = 60.0
 
 
@@ -78,9 +80,17 @@ class SegmentTimeUp(Exception):
     """The time budget for this segment ran out. Run again to continue."""
 
 
-def _clean_store_key(clean_key: CleanKey) -> str:
-    task, cluster, query = clean_key
-    return f"clean|{task}|{cluster}|q{query}"
+_clean_store_key = clean_store_key
+
+
+def is_out_of_memory(error: BaseException) -> bool:
+    """A CUDA allocation failure. CPU allocation failures stay fatal: halving would only hide them."""
+    if isinstance(error, torch.cuda.OutOfMemoryError):
+        return True
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return "cuda out of memory" in message or "cuda error: out of memory" in message or "alloc_failed" in message
 
 
 def library_versions() -> dict[str, str]:
@@ -116,11 +126,15 @@ class Session:
         tokenizer: Any = None,
         device: torch.device | None = None,
         model_commit: str | None = None,
+        store: ResultStore | None = None,
     ) -> None:
-        """model, tokenizer and model_commit are for tests. A real run resolves and pins the commit."""
+        """model, tokenizer and model_commit are for tests. A real run resolves and pins the commit.
+
+        store replaces out_dir/results.jsonl: a sharded worker writes to its own shard file.
+        """
         self.config = config
         self.out_dir = Path(out_dir)
-        self.store = ResultStore(self.out_dir / "results.jsonl")
+        self.store = store if store is not None else ResultStore(self.out_dir / "results.jsonl")
         self.device = device if device is not None else choose_device()
         raw_data = load_data(config.data_dir)
 
@@ -310,26 +324,23 @@ class Session:
         if not self.vectors:
             print(f"Computing concept vectors for {len(concepts)} concepts", flush=True)
             started = time.monotonic()
-            self.vectors, diagnostics = concept_vectors(
-                self.model,
-                self.tokenizer,
-                {layer: self.layers[layer] for layer in grid_layers},
-                concepts,
-                self.stimuli.baseline_words,
-                self.batch_size,
-                self.device,
-            )
-            payload = {
-                "identity": self.identity,
-                "vectors": {
-                    f"{concept}|{layer}": vector
-                    for concept, by_layer in self.vectors.items()
-                    for layer, vector in by_layer.items()
-                },
-            }
-            temporary = path.with_suffix(".tmp")
-            torch.save(payload, temporary)
-            os.replace(temporary, path)
+            while True:
+                try:
+                    self.vectors, diagnostics = concept_vectors(
+                        self.model,
+                        self.tokenizer,
+                        {layer: self.layers[layer] for layer in grid_layers},
+                        concepts,
+                        self.stimuli.baseline_words,
+                        self.batch_size,
+                        self.device,
+                    )
+                    break
+                except RuntimeError as error:
+                    if not is_out_of_memory(error) or self.batch_size == 1:
+                        raise
+                # Outside the except block, so the failed forward pass's tensors are already released.
+                self._recover_from_oom(self.batch_size // 2)
             fingerprint = vector_fingerprint(self.vectors, self.config.seed)
             stored = self.store.get("vector_diagnostics")
             if stored is None:
@@ -347,6 +358,18 @@ class Session:
             elif not fingerprints_match(stored["fingerprint"], fingerprint):
                 # A lost runtime recomputes vectors, and they must be the ones the stored rows used.
                 raise ValueError("Recomputed concept vectors differ from the ones this run's rows used")
+            # After the record: a crash in between recomputes and compares, and a saved file always has a record.
+            payload = {
+                "identity": self.identity,
+                "vectors": {
+                    f"{concept}|{layer}": vector
+                    for concept, by_layer in self.vectors.items()
+                    for layer, vector in by_layer.items()
+                },
+            }
+            temporary = path.with_suffix(".tmp")
+            torch.save(payload, temporary)
+            os.replace(temporary, path)
         dim = hidden_size(self.model)
         for concept in concepts:
             self.random_vectors[concept] = random_unit_vector(dim, self.config.seed, concept)
@@ -358,6 +381,36 @@ class Session:
             # Both random conditions share a direction per concept, so H3 compares scale alone.
             return self.random_vectors[trial.concept]
         raise ValueError(f"Unknown condition {trial.condition}")
+
+    # Out of memory
+
+    def _recover_from_oom(self, new_batch_size: int) -> None:
+        """Later batches stay at the smaller size: the next full-size batch would very likely fail again."""
+        self.batch_size = min(self.batch_size, max(1, new_batch_size))
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"CUDA out of memory: splitting the batch. Batch size is now at most {self.batch_size}", flush=True)
+
+    def _run_halving_on_oom(self, items: Sequence[Any], run: Any) -> None:
+        """Call run(part) over all items, splitting any part that runs out of memory.
+
+        run stores its rows in one append after its forward pass has succeeded, so a failed part has
+        stored nothing and a finished part is never run again: no row is lost or duplicated.
+        """
+        stack = [list(items)]
+        while stack:
+            part = stack.pop()
+            try:
+                run(part)
+                continue
+            except RuntimeError as error:
+                if not is_out_of_memory(error) or len(part) == 1:
+                    raise
+            half = len(part) // 2
+            self._recover_from_oom(half)
+            stack.append(part[half:])
+            stack.append(part[:half])
 
     # Clean runs
 
@@ -373,9 +426,12 @@ class Session:
             groups[len(self._prompt(key).input_ids)].append(key)
         for length in sorted(groups):
             group = groups[length]
-            for start in range(0, len(group), self.batch_size):
+            start = 0
+            while start < len(group):
                 self._check_time()
-                self._run_clean_batch(group[start : start + self.batch_size], keep_full)
+                batch = group[start : start + self.batch_size]
+                self._run_halving_on_oom(batch, lambda part: self._run_clean_batch(part, keep_full))
+                start += len(batch)
 
     def _run_clean_batch(self, keys: Sequence[CleanKey], keep_full: bool) -> None:
         prompts = [self._prompt(key) for key in keys]
@@ -438,10 +494,12 @@ class Session:
         done = len(trials) - len(pending)
         for group_key in sorted(groups):
             group = groups[group_key]
-            for start in range(0, len(group), self.batch_size):
+            start = 0
+            while start < len(group):
                 self._check_time()
                 batch = group[start : start + self.batch_size]
-                self._run_trial_batch(batch, measure_js)
+                self._run_halving_on_oom(batch, lambda part: self._run_trial_batch(part, measure_js))
+                start += len(batch)
                 done += len(batch)
                 self._progress(f"{batch[0].phase}: {done}/{len(trials)}")
 
@@ -512,7 +570,11 @@ class Session:
 
     def _sham_check(self) -> None:
         """alpha = 0 through the real hook, on one batch, against a clean run of that same batch."""
-        if self.store.has("sham"):
+        stored = self.store.get("sham")
+        if stored is not None:
+            # A failed check is stored too, and a restarted process must not take that as a pass.
+            if stored["max_abs_L"] > SHAM_TOLERANCE:
+                raise RuntimeError(f"Sham check failed: alpha = 0 gave |L| = {stored['max_abs_L']}")
             return
         self._check_time()
         cluster = next(iter(self.stimuli.clusters_calibration))

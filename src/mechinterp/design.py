@@ -18,6 +18,8 @@ PHASE_GRID = "calibration_grid"
 PHASE_IMPACT = "impact_search"
 PHASE_SCREEN = "screen"
 PHASE_TEST = "test"
+# Largest |L| accepted at alpha = 0. Sharded GPU runs tighten this to exactly 0 (see scripts/run_e1_gpu.sh).
+SHAM_TOLERANCE = 1e-4
 
 
 @dataclass(frozen=True)
@@ -407,6 +409,11 @@ def plan_clean_keys(
             else:
                 keys.append((task, cluster, None))
     return keys
+
+
+def clean_store_key(clean_key: tuple[str, str, int | None]) -> str:
+    task, cluster, query = clean_key
+    return f"clean|{task}|{cluster}|q{query}"
 
 
 def assert_trial_respects_split(trial: Trial, stimuli: Stimuli) -> None:
