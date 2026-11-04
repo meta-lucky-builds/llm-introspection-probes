@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -113,6 +113,7 @@ def fit_ensemble(
     settings: ProbeTraining,
     device: Any = "cpu",
     require_balance: bool = True,
+    on_epoch: Callable[[int, int], None] | None = None,
 ) -> Ensemble:
     """Fit one probe per layer, in lockstep. Label-shuffled baselines pass labels through here too, balanced as before."""
     import torch
@@ -179,6 +180,8 @@ def fit_ensemble(
     best: dict[str, Any] | None = None
     logged: list[np.ndarray] = []
     for epoch in range(settings.max_epochs):
+        if on_epoch is not None:
+            on_epoch(epoch, settings.max_epochs)
         order = torch.randperm(n_rows, generator=generator).to(device)
         for start in range(0, steps_per_epoch * settings.batch_size, settings.batch_size):
             rows = order[start : start + settings.batch_size]

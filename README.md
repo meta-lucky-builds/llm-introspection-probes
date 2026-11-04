@@ -57,7 +57,7 @@ None of these is a new measurement on a model. The [findings log](docs/FINDINGS.
 | Experiment | Question | State |
 |---|---|---|
 | [**E1**](experiments/e1_localization_capture/README.md) | Is localization a report or salience capture? | Small tier **done** on Qwen3-1.7B. Large tier written, never run on a GPU |
-| [**D1**](experiments/d1_double_down/README.md) | Does a lie probe survive training that silences self-report? | Built and reviewed, **never run**. Has a known hang risk, so [not safe to rent for yet](docs/reviews/D1_review.md#parallel-pass) |
+| [**D1**](experiments/d1_double_down/README.md) | Does a lie probe survive training that silences self-report? | Built and reviewed, **never run** on a real model. [Scheduler defects fixed](docs/reviews/D1_review.md#fixes), tested with fake processes only |
 | [**E2**](experiments/e2_jspace_vector_families/README.md) | Does the effect travel through J-space or the residual? | **Paused.** Code predates the corrected design |
 
 The [status page](docs/STATUS.md) lists what is left, and the [hypothesis ledger](docs/hypotheses.md) tracks every claim and candidate.

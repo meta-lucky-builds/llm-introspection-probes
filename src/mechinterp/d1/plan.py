@@ -20,6 +20,7 @@ import json
 import multiprocessing
 import os
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -83,8 +84,9 @@ def map_tokenized(function: Callable[[Any, Any], Any], items: Sequence[Any], tok
     global _FORK_SHARED
     _FORK_SHARED = (function, items, tokenizer)
     try:
-        with multiprocessing.get_context("fork").Pool(processes) as pool:
-            return pool.map(_fork_call, range(len(items)), chunksize=max(8, len(items) // (processes * 16)))
+        # Not multiprocessing.Pool, whose map waits forever if a child dies, as under the kernel's out-of-memory killer. This one raises.
+        with ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("fork")) as pool:
+            return list(pool.map(_fork_call, range(len(items)), chunksize=max(8, len(items) // (processes * 16))))
     finally:
         _FORK_SHARED = ()
 

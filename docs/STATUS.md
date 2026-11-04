@@ -8,17 +8,13 @@ Last updated 2026-11-04. **Nothing is running.** Each next step below waits on t
 |---|---|---|
 | E1 small tier, Qwen3-1.7B | Done. H1 mixed, H2 supported, H3 uninformative | Nothing |
 | E1 large tier, Qwen3-4B | Written and reviewed, never run on a GPU | A rented GPU machine and the owner's go-ahead |
-| D1 Double-Down | Written and reviewed twice, never run on a GPU | Open defects below |
+| D1 Double-Down | Written and reviewed, scheduler defects fixed, never run on a GPU | A rented GPU machine and the owner's go-ahead |
 | E2 J-space families | Paused. Code predates the corrected design | Open defects below |
 | M1' and M3' monitor controls | Design only, not preregistered | Paused |
 
 ## Open defects
 
-**D1**, from the [parallel pass](reviews/D1_review.md#parallel-pass). Fix these before renting:
-1. **High.** One training out-of-memory error can stop all scheduling while the machine bills, for up to 168 hours (`orchestrator.py`, `_back_off` and `_choose_card`). Scope the memory factor to the failing task, retire idle workers, and add a no-progress limit.
-2. **Medium.** A dead tokenizer process can hang `plan` (`plan.py`, `Pool.map`).
-3. **Medium.** A failed speculative task ends the run (`orchestrator.py`, `_on_failure`).
-4. **Low.** Probe fits have a stall clock and no heartbeat.
+**D1.** The [parallel pass](reviews/D1_review.md#parallel-pass) defects are fixed and covered by tests with fake processes. Real out-of-memory behaviour, peak memory and speed are still unmeasured.
 
 At D1's dry run, check two values: unmodified specificity above 0.60, and sham `p(Yes)` below 0.5. If either misses, a gate loses its meaning.
 

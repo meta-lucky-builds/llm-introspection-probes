@@ -7,7 +7,9 @@ gates at will. The tests at the end run real capture and training on the tiny mo
 from __future__ import annotations
 
 import json
+import os
 import time
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -388,6 +390,121 @@ def test_an_idle_capture_worker_gives_its_memory_to_an_adapter(tmp_path: Path) -
     pool.close()
 
 
+def test_one_out_of_memory_error_raises_only_that_tasks_need_and_the_next_adapter_still_starts(tmp_path: Path) -> None:
+    """The review's trace: one error used to raise every adapter's need past the card, while an idle capture worker kept it from emptying."""
+    pool, world = make_pool(tmp_path, cards=("0",), starved_seconds=5.0)
+    pool.needs.update({"capture": 5.0, "train": 19.1})
+    first, second = train("dd0"), train("dd1")
+    world.script["dd0"] = [(1, EXIT_OUT_OF_MEMORY)]
+    pool.run("Seed", [first])
+    assert pool._need(first) > 19.1
+    assert pool._need(second) == pytest.approx(19.1)
+    pool.run("Read", [shard("read")])
+    assert pool.workers and pool.workers[0].task is None, "an idle capture worker holds the card"
+    pool.run("Next", [second])
+    assert pool.paths.done("dd1").exists()
+    pool.close()
+
+
+def test_a_task_bigger_than_the_card_still_empties_it_of_idle_workers_and_gets_its_chance(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",), starved_seconds=5.0)
+    pool.needs["capture"] = 5.0
+    pool.run("Read", [shard("read")])
+    big = train("big")
+    big.need_gb = 100.0
+    pool.run("Big", [big])
+    assert pool.paths.done("big").exists()
+    assert world.spawned[0].code == 0, "it left when its stdin closed"
+    pool.close()
+
+
+def test_running_out_of_memory_beside_an_idle_worker_is_not_being_alone_on_the_card(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",))
+    pool.needs.update({"capture": 5.0, "train": 5.0})
+    pool.run("Read", [shard("read")])
+    task = train("t")
+    world.script["t"] = [(1, EXIT_OUT_OF_MEMORY)]
+    pool.run("Train", [task])
+    assert world.spawned[0].code == 0, "the idle worker made way"
+    assert task.argv[task.argv.index("--gradient-checkpointing") + 1] == "0", "the adapter did not step down"
+    assert "--halve-on-oom" not in task.argv
+    assert pool.card_limit == {}
+    pool.close()
+
+
+def test_a_worker_told_to_leave_that_does_not_is_killed(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",), retire_wait_seconds=0.0)
+    pool.run("Read", [shard("read")])
+    worker = pool.workers[0]
+    worker.process.stdin.close = lambda: None
+    pool._retire(worker)
+    pool._reap()
+    assert not pool.workers
+    assert ("kill", None, "0") in world.events
+    pool.close()
+
+
+def test_required_work_that_can_never_start_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool, _world = make_pool(tmp_path, cards=("0",), starved_seconds=0.05)
+    monkeypatch.setattr(pool, "_choose_card", lambda task, need: None)
+    with pytest.raises(RunFailed, match="not a finding"):
+        pool.run("Stuck", [train("t")])
+
+
+def test_a_task_with_no_heartbeat_that_never_ends_stops_the_run(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",), no_progress_seconds=0.1)
+    world.script["plan"] = [(None, 0)]
+    with pytest.raises(RunFailed, match="stuck run"):
+        pool.run("Plan", [Task("plan", ["plan", "--rung", TAG], gpu=False, loads_model=False)])
+
+
+def test_a_long_task_that_keeps_beating_and_a_long_gate_are_not_stuck(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",), no_progress_seconds=0.2)
+    assert pool.compute(lambda: time.sleep(0.5) or "done") == "done", "nothing was waiting, so the gate can take as long as it takes"
+    world.healthy_beats = {"long"}
+    world.script["long"] = [(None, 0)]
+    pool.submit("Long", [train("long")])
+    deadline = time.monotonic() + 0.6
+    while time.monotonic() < deadline:
+        pool._tick()
+        time.sleep(0.005)
+    assert world.started("long") == 1
+    pool.close()
+
+
+def test_a_speculative_failure_does_not_end_the_run_and_a_gate_can_still_ask_for_it(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path)
+    world.script["first"] = [(30, 0)]
+    world.script["spec"] = [(1, 3)]  # EXIT_FATAL
+    spec, reader = train("spec"), shard("reader", after=("spec",))
+    pool.submit("Maybe", [spec, reader], speculative=True)
+    pool.run("First", [train("first")])
+    assert pool.paths.done("first").exists()
+    assert not pool.paths.done("spec").exists()
+    assert not pool.queue and "spec" not in pool.speculative, "it left with what reads it"
+    pool.run("Needed", [train("spec")])
+    assert pool.paths.done("spec").exists() and world.started("spec") == 2
+    pool.close()
+
+
+def test_a_required_task_failing_after_its_speculative_try_ends_the_run(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path)
+    world.script["first"] = [(30, 0)]
+    world.script["spec"] = [(1, 3), (1, 3)]
+    pool.submit("Maybe", [train("spec")], speculative=True)
+    pool.run("First", [train("first")])
+    with pytest.raises(RunFailed, match="cannot fix"):
+        pool.run("Needed", [train("spec")])
+
+
+def test_a_speculative_task_that_required_work_reads_is_required(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path)
+    world.script["spec"] = [(1, 3)]
+    pool.submit("Maybe", [train("spec")], speculative=True)
+    with pytest.raises(RunFailed, match="cannot fix"):
+        pool.run("Needed", [shard("reader", after=("spec",))])
+
+
 def test_gates_run_while_the_cards_keep_working(tmp_path: Path) -> None:
     pool, world = make_pool(tmp_path)
     pool.submit("Beside", [shard("s0"), shard("s1")])
@@ -702,6 +819,16 @@ def test_tokenizing_on_several_processes_gives_the_same_answers_in_the_same_orde
         return encode_ids(shared, text)
 
     assert map_tokenized(function, texts, tokenizer, processes=3, min_rows=0) == map_tokenized(function, texts, tokenizer, processes=1)
+
+
+def test_a_tokenizer_process_that_dies_fails_the_task_and_does_not_hang() -> None:
+    def function(item: int, shared: Any) -> int:
+        if item == 5:
+            os._exit(1)
+        return item
+
+    with pytest.raises(BrokenProcessPool):
+        map_tokenized(function, list(range(60)), None, processes=2, min_rows=0)
 
 
 def test_the_bootstrap_does_not_depend_on_threads() -> None:

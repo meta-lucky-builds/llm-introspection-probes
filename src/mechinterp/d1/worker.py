@@ -23,7 +23,7 @@ from .config import D1Config, layers_for
 from .data import ingest, iter_parquet_rows, write_jsonl
 from .families import QUADRANTS
 from .paths import BASE_MODEL, D1Paths
-from .produce import FatalTaskError, answer_tokens, load_model, load_tokenizer, task_capture, task_train
+from .produce import Beat, FatalTaskError, answer_tokens, load_model, load_tokenizer, task_capture, task_train
 
 EXIT_FATAL = 3
 EXIT_OUT_OF_MEMORY = 4  # Not a crash. The pool makes room on the card and tries the task again.
@@ -76,7 +76,7 @@ def task_test_set(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None) 
     print(json.dumps(build_test_set(cfg, paths, tag, load_tokenizer(cfg.rung(tag), factory))), flush=True)
 
 
-def task_fit_probes(cfg: D1Config, paths: D1Paths, tag: str, name: str, source: str, kind: str, shuffle: bool, require_cuda: bool) -> None:
+def task_fit_probes(cfg: D1Config, paths: D1Paths, tag: str, name: str, source: str, kind: str, shuffle: bool, require_cuda: bool, task_name: str) -> None:
     import numpy as np
     import torch
 
@@ -96,7 +96,9 @@ def task_fit_probes(cfg: D1Config, paths: D1Paths, tag: str, name: str, source: 
         rng = np.random.default_rng(cfg.analysis.seed)
         train_labels = rng.permutation(train_labels)
         val_labels = rng.permutation(val_labels)
-    probe = fit_ensemble(fit_store.acts, train_labels, val_store.acts, val_labels, layers_for(cfg.fractions, rung.n_layers), kind, cfg.probes, device)
+    beat = Beat(paths, task_name)
+    beat.base["loaded"] = True
+    probe = fit_ensemble(fit_store.acts, train_labels, val_store.acts, val_labels, layers_for(cfg.fractions, rung.n_layers), kind, cfg.probes, device, on_epoch=lambda epoch, total: beat(epoch, total, 0.0))
     if shuffle:
         # A label-shuffled probe reads noise, so the layer rule would drop every layer. Keep them for the baseline.
         probe.retained = np.ones_like(probe.retained)
@@ -182,7 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sets = [name for name in args.sets.split(",") if name]
             task_capture(cfg, paths, args.rung, args.model_id, sets, args.shard, args.n_shards, args.task_name, args.factory, args.require_cuda, args.token_budget)
         elif args.task == "fit-probes":
-            task_fit_probes(cfg, paths, args.rung, args.name, args.source, args.kind, args.shuffle, args.require_cuda)
+            task_fit_probes(cfg, paths, args.rung, args.name, args.source, args.kind, args.shuffle, args.require_cuda, args.task_name)
         elif args.task == "train":
             task_train(cfg, paths, args.rung, args.condition, args.seed, args.attempt, args.task_name, args.factory, args.require_cuda, args.in_process, bool(args.gradient_checkpointing), args.halve_on_oom)
         elif args.task == "preflight":

@@ -93,6 +93,9 @@ class PoolOptions:
     gpu_poll_seconds: float = 15.0
     settle_seconds: float = 90.0  # Utilization means nothing while a worker is still loading.
     idle_warn_seconds: float = 60.0
+    starved_seconds: float = 900.0  # Required work is ready and no worker holds a task. This should only ever last moments.
+    no_progress_seconds: float = 21600.0  # Nothing started, finished or beat. The last guard, for what no other limit sees.
+    retire_wait_seconds: float = 300.0  # A worker told to leave that has not left by then is killed, since it holds its card.
 
 
 @dataclass
@@ -107,6 +110,7 @@ class Worker:
     job_started: float = 0.0
     has_loaded: bool = False
     retiring: bool = False
+    retired_at: float = 0.0
 
 
 def parse_gpu_query(output: str) -> dict[str, dict[str, float]]:
@@ -181,6 +185,8 @@ class TaskPool:
         self.last_print = time.monotonic()
         self.last_query = -math.inf
         self.serial = 0
+        self.last_progress = time.time()
+        self.starved_since: float | None = None
 
     # What the experiment tells the pool
 
@@ -223,6 +229,7 @@ class TaskPool:
             self.queue.append(task)
             added += 1
         if added:
+            self.last_progress = time.time()
             print(f"[{time.strftime('%H:%M:%S')}] {label}: {added} task(s) queued{', speculatively' if speculative else ''}", flush=True)
 
     def cancel(self, tasks: Sequence[Task]) -> None:
@@ -234,6 +241,7 @@ class TaskPool:
                 print(f"Cancelling {worker.task.name}, which the gate no longer needs", flush=True)
                 worker.task = None
                 worker.retiring = True
+                worker.retired_at = time.monotonic()
                 if not kill_bounded(worker.process, self.options.kill_wait_seconds):
                     print(f"WARNING: process {worker.process.pid} cannot be killed, so it is being left behind.", flush=True)
         self.speculative -= names
@@ -295,6 +303,7 @@ class TaskPool:
         self._reap()
         self._dispatch()
         self._check_for_deadlock()
+        self._check_for_no_progress()
         now = time.monotonic()
         self._warn_about_idle_cards(now)
         if now - self.last_print >= self.options.progress_seconds:
@@ -331,7 +340,7 @@ class TaskPool:
 
     def _need(self, task: Task) -> float:
         need = task.need_gb if task.need_gb is not None else self.needs.get(task.kind, self.default_need_gb)
-        return need * self.need_factor.get(task.kind, 1.0)
+        return need * self.need_factor.get(task.name, 1.0)
 
     def _is_ready(self, task: Task) -> bool:
         return all(self.paths.done(name).exists() for name in task.after)
@@ -354,7 +363,11 @@ class TaskPool:
         return len(samples) >= MIN_UTIL_SAMPLES and sum(samples) / len(samples) < self.options.saturated_utilization
 
     def _choose_card(self, task: Task, need: float) -> str | None:
-        """The least loaded card this fits on, or None. An idle capture worker gives its memory back if that is what stands in the way."""
+        """The least loaded card this fits on, or None. An idle capture worker gives its memory back if that is what stands in the way.
+
+        On a card with nothing else running it always leaves, even if the task looks too big, since an empty card always gets the
+        chance. Otherwise a task whose need has grown past the card would wait forever for a card that never empties.
+        """
         for card in sorted(self.cards, key=lambda name: (len(self._busy(name)), -self._room(name), self.cards.index(name))):
             if task.loads_model and self._busy(card) and not self.can_share(card):
                 continue
@@ -363,7 +376,7 @@ class TaskPool:
             if room >= need or not live:  # An empty card always gets the chance. Capture and training can step down from there.
                 return card
             idle = [worker for worker in live if worker.task is None and not worker.retiring]
-            if idle and room + sum(worker.need_gb for worker in idle) >= need:
+            if idle and (not self._busy(card) or room + sum(worker.need_gb for worker in idle) >= need):
                 for worker in idle:
                     self._retire(worker)
         return None
@@ -397,9 +410,10 @@ class TaskPool:
         for worker in list(self.workers):
             code = worker.process.poll()
             task = worker.task
-            if code is None:
-                if task is None:
+            if code is None and task is None:
+                if not self._overdue(worker):
                     continue
+            elif code is None:
                 if worker.serves and self.paths.done(task.name).exists():
                     self._finish(worker)
                     continue
@@ -417,6 +431,15 @@ class TaskPool:
                 self._finish(worker)
             else:
                 self._on_failure(worker, task, code if code != 0 else 1)
+
+    def _overdue(self, worker: Worker) -> bool:
+        """A worker told to leave that has not. It still holds its card's memory, so it is killed, and the card is free again."""
+        if not worker.retiring or time.monotonic() - worker.retired_at < self.options.retire_wait_seconds:
+            return False
+        print(f"Process {worker.process.pid} was told to leave {self.options.retire_wait_seconds / 60:.0f} minutes ago and has not. Killing it.", flush=True)
+        if not kill_bounded(worker.process, self.options.kill_wait_seconds):
+            raise RunFailed(f"Process {worker.process.pid} cannot be killed, so it is stuck in the GPU driver. This machine probably needs a reboot.")
+        return True
 
     def _stalled(self, worker: Worker, task: Task) -> bool:
         """By this task's own heartbeat, so that a slow neighbour on the card cannot make it look stuck, or hide that it is."""
@@ -444,6 +467,7 @@ class TaskPool:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
         self.finished += 1
+        self.last_progress = time.time()
         self.speculative.discard(task.name)
         self.elapsed_by_kind.setdefault(task.kind, []).append(time.time() - worker.job_started)
         if worker.device is not None:
@@ -454,27 +478,65 @@ class TaskPool:
         if code == 2:
             raise RunFailed(f"The dry-run checks failed for {task.name}. See PASS and FAIL in {worker.log_path}")
         if code == EXIT_FATAL:
-            raise RunFailed(f"{task.name} hit an error that a restart cannot fix. See {worker.log_path}")
+            self._give_up(task, f"{task.name} hit an error that a restart cannot fix. See {worker.log_path}")
+            return
         if code == EXIT_OUT_OF_MEMORY:
             self._back_off(worker, task)
             return
         self.restarts[task.name] = self.restarts.get(task.name, 0) + 1
         if self.restarts[task.name] > self.options.max_restarts:
-            raise RunFailed(f"{task.name} failed {self.restarts[task.name]} times, so the run stopped. See {worker.log_path}")
+            self._give_up(task, f"{task.name} failed {self.restarts[task.name]} times, so the run stopped. See {worker.log_path}")
+            return
         print(f"Restarting {task.name}, attempt {self.restarts[task.name]} of {self.options.max_restarts}", flush=True)
         self.queue.insert(0, task)
+
+    def _give_up(self, task: Task, reason: str) -> None:
+        """Ends the run, unless the task is speculative and nothing required reads it. Work a gate may never need cannot end a run.
+
+        It is dropped with whatever queued work reads it, and its counts go too. If a gate then needs it, it is asked for again as
+        required, and a second failure ends the run properly.
+        """
+        dependents = self._queued_dependents(task.name)
+        if task.name not in self.speculative or any(name not in self.speculative for name in dependents):
+            raise RunFailed(reason)
+        print(f"Dropping speculative {task.name} and {len(dependents)} task(s) that read it. It runs again only if a gate needs it. {reason}", flush=True)
+        dropped = {task.name} | dependents
+        self.queue = [queued for queued in self.queue if queued.name not in dropped]
+        self.speculative -= dropped
+        for name in dropped:
+            self.restarts.pop(name, None)
+            self.oom_retries.pop(name, None)
+            self.need_factor.pop(name, None)
+
+    def _queued_dependents(self, name: str) -> set[str]:
+        found: set[str] = set()
+        frontier = [name]
+        while frontier:
+            current = frontier.pop()
+            for task in self.queue:
+                if current in task.after and task.name not in found:
+                    found.add(task.name)
+                    frontier.append(task.name)
+        return found
 
     def _back_off(self, worker: Worker, task: Task) -> None:
         """The worker's slot goes, the task goes back, and a resume or a done mask loses at most its unflushed part."""
         card = worker.device
         self.oom_retries[task.name] = self.oom_retries.get(task.name, 0) + 1
         if self.oom_retries[task.name] > MAX_OOM_RETRIES:
-            raise RunFailed(f"{task.name} ran out of GPU memory {self.oom_retries[task.name]} times, also alone on a card. This is a limit of the machine and not a finding about the model. See {worker.log_path}")
-        self.need_factor[task.kind] = self.need_factor.get(task.kind, 1.0) * OOM_NEED_FACTOR
+            self._give_up(task, f"{task.name} ran out of GPU memory {self.oom_retries[task.name]} times, also alone on a card. This is a limit of the machine and not a finding about the model. See {worker.log_path}")
+            return
+        # This task's own need only. One task's error says nothing about the sizes of the others.
+        self.need_factor[task.name] = self.need_factor.get(task.name, 1.0) * OOM_NEED_FACTOR
         others = len(self._busy(card)) if card is not None else 0
+        idle = [other for other in self._live(card) if other.task is None and not other.retiring] if card is not None else []
         if card is not None and others > 0:
             self.card_limit[card] = others
             print(f"{task.name} ran out of memory beside {others} other worker(s), so card {card} now takes at most {others}, and the task goes back in the queue.", flush=True)
+        elif idle:
+            for other in idle:
+                self._retire(other)
+            print(f"{task.name} ran out of memory beside {len(idle)} idle capture worker(s) on card {card}, so they leave, and the task goes back in the queue unchanged.", flush=True)
         else:
             self._step_down(task)
             print(f"{task.name} ran out of memory alone on card {card}, so it steps down, and goes back in the queue.", flush=True)
@@ -493,6 +555,7 @@ class TaskPool:
     def _retire(self, worker: Worker) -> None:
         """A capture worker leaves when its stdin closes, which gives its model's memory back."""
         worker.retiring = True
+        worker.retired_at = time.monotonic()
         try:
             worker.process.stdin.close()
         except (OSError, ValueError):
@@ -506,6 +569,31 @@ class TaskPool:
         if stuck:
             missing = sorted({name for task in stuck for name in task.after if not self.paths.done(name).exists()})
             raise RunFailed(f"{len(stuck)} task(s) wait for {missing[:5]}, which nothing is running. This is a bug in the order of work, and not a finding.")
+
+    def _check_for_no_progress(self) -> None:
+        """The log keeps moving while nothing happens, so the run script's idle limit cannot see this. Only the run's overall limit would."""
+        now = time.time()
+        holding = [worker.task for worker in self.workers if worker.task is not None]
+        required = [task for task in self.queue if task.name not in self.speculative]
+        if not holding and not required:  # A gate is computing, or nothing is being waited for.
+            self.last_progress = now
+            self.starved_since = None
+            return
+        for task in holding:
+            try:
+                self.last_progress = max(self.last_progress, self.paths.heartbeat(task.name).stat().st_mtime)
+            except OSError:
+                pass
+        starved = not holding and any(self._is_ready(task) for task in required)
+        if not starved:
+            self.starved_since = None
+        elif self.starved_since is None:
+            self.starved_since = now
+        elif now - self.starved_since >= self.options.starved_seconds:
+            names = [task.name for task in required if self._is_ready(task)][:5]
+            raise RunFailed(f"{names} are ready, but none of them has been able to start for {self.options.starved_seconds / 60:.0f} minutes, and nothing is running. This is a bug in the scheduler, and not a finding.")
+        if now - self.last_progress >= self.options.no_progress_seconds:
+            raise RunFailed(f"No task started, finished or reported progress for {self.options.no_progress_seconds / 3600:.1f} hours, holding {[task.name for task in holding][:5]}. This is a stuck run, and not a finding.")
 
     # Starting work
 
@@ -555,6 +643,7 @@ class TaskPool:
         self.settled_at[card] = time.monotonic() + self.options.settle_seconds
 
     def _start(self, task: Task, device: str | None) -> None:
+        self.last_progress = time.time()
         if device is not None:
             self.first_start.setdefault(device, time.monotonic())
             self._card_changed(device)
@@ -577,6 +666,7 @@ class TaskPool:
 
     def _assign(self, worker: Worker, task: Task) -> None:
         self.paths.heartbeat(task.name).unlink(missing_ok=True)
+        self.last_progress = time.time()
         worker.task = task
         worker.job_started = time.time()
         try:
@@ -1189,7 +1279,8 @@ def run_all(
         cfg = D1Config.from_file(config_path)
         options = PoolOptions(
             list(devices), Path(config_path), Path(out_dir), factory=factory, threads_per_worker=threads_per_worker,
-            load_slots=load_slots, stall_seconds=stall_minutes * 60.0, workers_per_gpu=workers_per_gpu,
+            load_slots=load_slots, stall_seconds=stall_minutes * 60.0, load_stall_seconds=max(1800.0, stall_minutes * 60.0), workers_per_gpu=workers_per_gpu,
+            no_progress_seconds=max(21600.0, stall_minutes * 120.0),
         )  # fmt: skip
         pool = TaskPool(options, paths)
         experiment = Experiment(cfg, paths, pool, len(devices), gpu_free_gb, download=None if factory else download_rung, check_capacity=factory is None)

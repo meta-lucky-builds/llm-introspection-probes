@@ -226,3 +226,14 @@ Commit ec75a9d, by reading only. Nothing ran except `bash -n scripts/run_d1_gpu.
 - **Machine-dependent settings.** All tasks launched together take one schedule, so DD and SHAM match. Step-down can differ per task, which is rounding only, as the tests assert on the tiny model. Checkpointing and budget are outside the identity, on purpose, as the change log allows. They are recorded in `run.log`, and not per adapter in `training.json`, which is worth adding but changes no verdict.
 - **Shards and GPU count.** `TOKENS_PER_SHARD` is a constant, and `assign_shards` is pure in lengths and count. The token budget is not in task names, so a resume at another budget only changes batching.
 - **1.7B config and one command.** `run_d1_gpu.sh` passes syntax. The default config, `cli` arguments, `run_all` order and `PoolOptions` agree, and the empty `workers_per_gpu` array matches the script's existing `resuming` pattern. The new `training_transcripts` and `training_ordinary` files are written in `build_training_rows` before the dry run reads them.
+
+### Fixes
+
+All four defects above are fixed, with tests in `tests/test_d1_parallel.py` and `tests/test_d1_rules.py` that use fake processes. Nothing here has run on a real GPU.
+
+1. **Hang.** The memory factor belongs to the failing task. An idle capture worker leaves whenever its card has nothing running. Running out of memory beside an idle worker makes that worker leave, with no step-down. A worker told to leave is killed after 5 minutes. Required work that can't start with nothing running fails after 15 minutes, and a run with no start, finish or heartbeat fails after 6 hours. The overall limit fell from 168 to 120 hours.
+2. **Tokenizer.** `ProcessPoolExecutor` raises when a child dies, so the task fails and uses its restart limit.
+3. **Speculation.** A failed speculative task is dropped with the queued work that reads it, unless required work reads it. If a gate later asks for it, it runs as required, and a second failure ends the run.
+4. **Fits.** A fit beats at the start of each epoch. `load_stall_seconds` now follows `D1_STALL_MINUTES` when that is above 30 minutes.
+
+`probes.py` is hashed, so this changes its fingerprint. No stored data exists, so nothing is lost.

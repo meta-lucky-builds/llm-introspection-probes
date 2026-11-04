@@ -422,6 +422,14 @@ def test_probe_learns_a_planted_direction_and_keeps_its_layers(kind: str, tmp_pa
     assert np.allclose(loaded.score(val), probe.score(val))
 
 
+def test_fitting_reports_each_epoch_it_starts() -> None:
+    train, train_y = planted_activations(240, 0)
+    val, val_y = planted_activations(80, 1)
+    seen: list[tuple[int, int]] = []
+    fit_ensemble(train, train_y, val, val_y, [5, 7, 9], "linear", small_settings(max_epochs=2), on_epoch=lambda epoch, total: seen.append((epoch, total)))
+    assert seen == [(0, 2), (1, 2)]
+
+
 def test_noise_layer_is_dropped_by_the_loss_rule() -> None:
     train, train_y = planted_activations(240, 0, strength=3.0)
     val, val_y = planted_activations(80, 1, strength=3.0)
