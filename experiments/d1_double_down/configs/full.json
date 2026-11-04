@@ -1,0 +1,52 @@
+{
+  "experiment": "D1",
+  "seed": 20261104,
+  "data_dir": "../data",
+  "dataset": {
+    "repo": "AlignmentResearch/fibs-v1",
+    "revision": "65dccf12934620bfe01db665ea3d7d0e3c9f1355",
+    "parquet_sha256": {
+      "honest_honest": "a805f8cc5e1a0f8cc1ae6ba090ee6c79e2596cf58c3cbdf8725d8d5f8dc0e8ae",
+      "honest_deceptive": "257531ac79ac9db1416dda1ff115848017aa136dce928cd184027d8324dcf912",
+      "deceptive_honest": "4330b8ec9859428d7be1f7a6065d03c0b111c2e492fed2e5252743d7671df68e",
+      "deceptive_deceptive": "44e90fe947b16bf9729b831cdf394c849f901bc0c5fca6d95477ef2966f8661e"
+    }
+  },
+  "ladder": [
+    {"name": "Qwen/Qwen3-1.7B", "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e", "dtype": "float32", "gpu_gb": 14, "n_layers": 28, "d_model": 2048},
+    {"name": "Qwen/Qwen3-4B", "revision": "1cfa9a7208912126459214e8b04321603b3df60c", "dtype": "float32", "gpu_gb": 22, "n_layers": 36, "d_model": 2560},
+    {"name": "Qwen/Qwen3-8B", "revision": "b968826d9c46dd6066d109eabc6255188de91218", "dtype": "bfloat16", "gpu_gb": 22, "n_layers": 36, "d_model": 4096},
+    {"name": "Qwen/Qwen3-14B", "revision": "40c069824f4251a91eefaf281ebe4c544efd3e18", "dtype": "bfloat16", "gpu_gb": 36, "n_layers": 40, "d_model": 5120}
+  ],
+  "fractions": ["0.3", "0.42", "0.55", "0.67", "0.8", "0.9"],
+  "capture_token_budget": 24000,
+  "sizes": {
+    "probe_fit_rows": 20000,
+    "probe_val_rows": 2000,
+    "max_tokens": 2048,
+    "calibration_per_class_per_family": 500,
+    "g1_per_class_per_family": 150,
+    "max_per_class_per_family": 800,
+    "sizing_grid": [150, 200, 300, 400, 500, 650, 800],
+    "target_half_width": 0.05,
+    "sham_check_rows": 200
+  },
+  "training": {
+    "seeds": [0, 1, 2],
+    "rank": 16,
+    "alpha": 32.0,
+    "steps": 2000,
+    "batch_size": 16,
+    "micro_batch": 4,
+    "learning_rate": 0.0002,
+    "warmup_steps": 50,
+    "max_tokens": 640,
+    "ordinary_answer_tokens": 48,
+    "manipulation_rows_per_batch": 8,
+    "fact_rows_per_batch": 2,
+    "n_base_rows": 4000,
+    "n_ordinary_rows": 4000
+  },
+  "probes": {},
+  "analysis": {}
+}

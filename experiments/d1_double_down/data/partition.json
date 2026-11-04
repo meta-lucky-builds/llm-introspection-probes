@@ -1,0 +1,15 @@
+{
+  "_comment": "Frozen before any activations. Produced by mechinterp.d1.families.assign_partitions(20261104); tests/test_d1_data.py checks the code still reproduces this file. Family names and counts only, no row text. parquet_sha256 is the Git LFS oid of each file at the pinned revision, read from the Hugging Face API, and each download is checked against it.",
+  "seed": 20261104,
+  "dataset": "AlignmentResearch/fibs-v1",
+  "revision": "65dccf12934620bfe01db665ea3d7d0e3c9f1355",
+  "parquet_sha256": {
+    "honest_honest": "a805f8cc5e1a0f8cc1ae6ba090ee6c79e2596cf58c3cbdf8725d8d5f8dc0e8ae",
+    "honest_deceptive": "257531ac79ac9db1416dda1ff115848017aa136dce928cd184027d8324dcf912",
+    "deceptive_honest": "4330b8ec9859428d7be1f7a6065d03c0b111c2e492fed2e5252743d7671df68e",
+    "deceptive_deceptive": "44e90fe947b16bf9729b831cdf394c849f901bc0c5fca6d95477ef2966f8661e"
+  },
+  "probe_train": ["among", "b1-bare", "b1-followup", "caving", "longcontext", "medqa", "multi", "negotiation", "persona_prefill", "synthetic", "ultrachat", "werewolf", "wikihow", "wikihownest"],
+  "adapter_train": ["anti", "doluschat", "fabricated", "fever", "instructed", "model", "original"],
+  "test": ["harm", "liarsbench", "lies", "mask", "sandbagging", "sycophancy", "truthfulqa"]
+}

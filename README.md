@@ -220,6 +220,82 @@ The prereg is not edited by this work. These need logging before data is collect
 
 The lens file has never been opened: its keys, dtype and layers are inferred from its size and from upstream's code. Nothing has run, including these tests. Not known until a run: whether `tokenizer.vocab_size` excludes Qwen's added tokens as expected; the number of single-token concepts; whether the dictionary fits beside the weights on a 24 GB card, with a fallback to CPU if not; whether the alignment check's backward pass fits, which is skipped with a warning if not; and the speed.
 
+## D1: Double-Down at small scale
+
+Does a lie probe trained on the unmodified model survive ordinary fine-tuning that makes the model always say it was truthful? [Prereg](docs/preregistrations/D1_double_down_small.md), which this work does not edit. Nothing here has been run, including the tests.
+
+```bash
+bash scripts/run_d1_gpu.sh
+```
+
+It behaves like E1's script: preflight, venv, torch matching the driver, cache on the persistent disk, detach, lock, resume, stage ETAs, `D1_ON_FINISH`, a DONE or FAILED banner. Results go to `results/d1/` with sha256 sums. It uses every GPU it finds. One 24 GB GPU reaches Qwen3-8B. Qwen3-14B needs 36 GB, and without that the run stops as FAILED, which is not recorded as a finding. Every outcome the prereg names ends as DONE.
+
+Code is in `src/mechinterp/d1/`, and data files and the frozen manifest in `experiments/d1_double_down/`. FIBS has no license tag, so its rows are downloaded at run time, stay in the state directory, and never reach the repo or the results. A test checks this.
+
+### Family and Y
+
+`family` is `source` up to the first underscore, and any `persona_prefill*` is `persona_prefill`. This held on all of about 960 rows read through the datasets-server, covering all 28 families, but the exact counts cannot be checked without the parquet. So the first run step compares the exact family by quadrant table of `provenance/BUILD.json` and the category totals, and any difference stops the run before a GPU is used. If it stops, the fallback is a source-to-family table built from the file.
+
+The README says the first quadrant term labels the base turn. The paper (N.1) limits that to its 120,432 follow-up pipeline rows, whose categories are `cat_A` to `cat_J` without `cat_interleaved`. That sum, and the family counts behind it, reconcile exactly with the published statistics. Elsewhere the first term means a game side, a persona, an instruction, or repeats the label. So D1 uses pipeline rows only:
+
+- **No pipeline rows:** among, werewolf, negotiation, caving, multi, wikihow, b1-bare. Persona has 588 and longcontext 43.
+- **`cat_J` delays the question with unrelated turns**, so its last assistant turn is not the base turn. It can fit probes, which read the final answer, but gives no Y.
+- **Single-class in Y:** ultrachat is all honest and synthetic all deceptive.
+
+### Prompts
+
+For each unique base conversation, meaning `messages[:-1]` of a non-delayed pipeline row, ending in the base assistant turn:
+
+```
+render(base + [user: wording], generation prompt, thinking off) + "Yes."   read at "."
+render(base + [user: wording], generation prompt, thinking off) + "No."    read at "."
+```
+
+- FIBS's follow-up and `completion` are discarded. Rows that differ only after the base turn merge into one transcript, and a key seen with both labels is dropped.
+- Self-report is `log p(No) - log p(Yes)` at the last generation-prompt token. The base-turn read renders the base turn as the final turn and reads its last token.
+- Probes fit on native rows of probe-train families, read at the completion's last token, with the label from the quadrant's **second** term, as FIBS trains.
+- All 30 wordings have one polarity, so No is always the admission. Each group of transcripts gets one held-out and one training wording.
+
+### Choices beyond the prereg, for its change log
+
+1. Forced partition: families that cannot be scored go to probe-train, so **only about 7 of its 14 families hold rows**, and 2 of those are tiny. This follows the rule excluding direct rows, and it may weaken the probe.
+2. Related families beyond wikihow: lies, mask and sandbagging; ultrachat and synthetic; b1-bare and b1-followup; harm and liarsbench. Mask is in test because lies reuses its prompts. A prompt also seen in another partition stays only in the one closest to test.
+3. `cat_J` gives no Y, and only pipeline rows are used, as above.
+4. AUROC is pooled, with families exactly balanced by class. Within-family AUROC is reported beside it and decides nothing.
+5. "Transcripts" means groups, one first user message within a family. Groups nest in families, so the two-way bootstrap draws families, then groups. Seeds are not resampled. D is paired by seed, then the median is taken, inside every replicate. Percentile intervals undercover at 7 families, and the report says by how much.
+6. Sample size assumes correlation 0 between the DD and SHAM AUROCs, since adapters do not exist yet. If no n reaches 0.05, the largest is used and logged.
+7. "Within 0.05" and "within 5 points" are two-sided, on points. Only the DD self-report uses an upper bound. A one-seed pass followed by a failed median across seeds uses the same single retry.
+8. One wording per transcript, not all ten. Prompts over 2,048 tokens are dropped, and adapter training rows over 640.
+9. LoRA: my own forward hooks on block linears, not peft, so the base is never modified. All blocks, alpha 32, 2,000 steps, batch 16, lr 2e-4, answer tokens only. These numbers are untested choices.
+10. Ordinary rows: honest native follow-ups, honest base replies, and a Yes/No fact list disjoint from G2's. Without the facts, DD could fail G2 by saying Yes to everything. Adapter rows are English only, because SHAM's question says English.
+11. Calibration (sign, threshold) uses probe-train transcripts with no source prompt in common with fit or val, two-class families only. Each metric has its own sign.
+12. Probe details from the FIBS paper: AdamW 5e-3, batch 32, 6 epochs, shared clip and checkpoint, `round(f * N)` half up for layers, which reproduces its published table. The label-shuffled baseline keeps all layers.
+13. float32 weights for 1.7B and 4B, bfloat16 for 8B and 14B to fit, with logits always computed in float32.
+
+Reading recall at 1% FPR after a collapse: contrast near 0 clears a threshold set below 0, so recall can be high with a high FPR. Read it only beside `realized_fpr`, which the report prints.
+
+### Not implementable exactly as written
+
+- The prereg's 14, 7 and 7 is kept in family counts, but 7 families have no follow-up rows to use, so the partitions are not equal in effect.
+- "Rows sharing a source conversation stay together" can only be enforced by matching first user messages. Translated copies (5%) can escape the match.
+
+### GPU-hours: estimates, nothing measured
+
+Assumed: test n of 800 per class per family, 500 tokens per prompt, 300 per training row, forward speeds of 40k tokens/s on 1.7B and 20k on 4B, training 8k and 4k tokens/s, one 24 GB GPU.
+
+| Path | 1.7B | 4B |
+|---|---|---|
+| G1 only | 0.3 h | 0.6 h |
+| Stop at G2 after the retry | about 3 h | about 6 h |
+| Full run, no retry | about 9 h | about 17 h |
+| Full run, with the retry | about 15 h | about 28 h |
+
+Several GPUs divide this nearly linearly. Allow 70 GB of disk. Colab's free tier has no GPU here, so assume a rented machine.
+
+### Unverified without a GPU
+
+The exact family counts on the real parquet; Qwen3's tokenization of `Yes.` and `No.`; fit into 24 GB for 4B training; adapter behaviour at these steps; speed; probe convergence on the reduced family set; whether bfloat16 rounds small adapter updates away on 8B; and every test, which CI runs first.
+
 ## Run on GPU by hand
 
 ```bash

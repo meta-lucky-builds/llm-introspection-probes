@@ -1,0 +1,55 @@
+{
+  "_comment": "Aggregate counts only, no row text. family_quadrant is provenance/BUILD.json 'after' at revision 65dccf12. follow_up_pipeline_rows is FIBS paper Table 28 and N.1-N.3 (19 follow-up families minus the minority rows). category_totals is the datasets-server statistics endpoint, summed over the four splits. Every number here is checked at run time against the downloaded parquet, and any difference stops the run.",
+  "total_rows": 163016,
+  "quadrant_totals": {"honest_honest": 43941, "honest_deceptive": 41044, "deceptive_honest": 37567, "deceptive_deceptive": 40464},
+  "family_totals_readme": {
+    "among": 6464, "anti": 7984, "b1-bare": 4034, "b1-followup": 4488, "caving": 1648, "doluschat": 8000, "fabricated": 2164,
+    "fever": 8000, "harm": 8000, "instructed": 7868, "liarsbench": 7992, "lies": 6760, "longcontext": 1764, "mask": 8000,
+    "medqa": 4020, "model": 3304, "multi": 1476, "negotiation": 6954, "original": 4204, "persona_prefill": 8000,
+    "sandbagging": 6700, "sycophancy": 7976, "synthetic": 8000, "truthfulqa": 4804, "ultrachat": 8000, "werewolf": 6692,
+    "wikihow": 1760, "wikihownest": 7960
+  },
+  "family_quadrant": {
+    "among": {"honest_honest": 1616, "honest_deceptive": 1616, "deceptive_honest": 1616, "deceptive_deceptive": 1616},
+    "anti": {"honest_honest": 1996, "honest_deceptive": 1996, "deceptive_honest": 1996, "deceptive_deceptive": 1996},
+    "b1-bare": {"honest_honest": 2017, "deceptive_deceptive": 2017},
+    "b1-followup": {"honest_honest": 1122, "honest_deceptive": 1122, "deceptive_honest": 1122, "deceptive_deceptive": 1122},
+    "caving": {"honest_honest": 412, "honest_deceptive": 412, "deceptive_honest": 412, "deceptive_deceptive": 412},
+    "doluschat": {"honest_honest": 2000, "honest_deceptive": 2000, "deceptive_honest": 2000, "deceptive_deceptive": 2000},
+    "fabricated": {"honest_honest": 541, "honest_deceptive": 541, "deceptive_honest": 541, "deceptive_deceptive": 541},
+    "fever": {"honest_honest": 2000, "honest_deceptive": 2000, "deceptive_honest": 2000, "deceptive_deceptive": 2000},
+    "harm": {"honest_honest": 2000, "honest_deceptive": 2000, "deceptive_honest": 2000, "deceptive_deceptive": 2000},
+    "instructed": {"honest_honest": 1967, "honest_deceptive": 1967, "deceptive_honest": 1967, "deceptive_deceptive": 1967},
+    "liarsbench": {"honest_honest": 1998, "honest_deceptive": 1998, "deceptive_honest": 1998, "deceptive_deceptive": 1998},
+    "lies": {"honest_honest": 1690, "honest_deceptive": 1690, "deceptive_honest": 1690, "deceptive_deceptive": 1690},
+    "longcontext": {"honest_honest": 441, "honest_deceptive": 441, "deceptive_honest": 441, "deceptive_deceptive": 441},
+    "mask": {"honest_honest": 2000, "honest_deceptive": 2000, "deceptive_honest": 2000, "deceptive_deceptive": 2000},
+    "medqa": {"honest_honest": 1005, "honest_deceptive": 1005, "deceptive_honest": 1005, "deceptive_deceptive": 1005},
+    "model": {"honest_honest": 826, "honest_deceptive": 826, "deceptive_honest": 826, "deceptive_deceptive": 826},
+    "multi": {"honest_honest": 369, "honest_deceptive": 369, "deceptive_honest": 369, "deceptive_deceptive": 369},
+    "negotiation": {"honest_honest": 3477, "honest_deceptive": 3477},
+    "original": {"honest_honest": 1051, "honest_deceptive": 1051, "deceptive_honest": 1051, "deceptive_deceptive": 1051},
+    "persona_prefill": {"honest_honest": 2000, "honest_deceptive": 2000, "deceptive_honest": 2000, "deceptive_deceptive": 2000},
+    "sandbagging": {"honest_honest": 1675, "honest_deceptive": 1675, "deceptive_honest": 1675, "deceptive_deceptive": 1675},
+    "sycophancy": {"honest_honest": 1994, "honest_deceptive": 1994, "deceptive_honest": 1994, "deceptive_deceptive": 1994},
+    "synthetic": {"deceptive_honest": 4000, "deceptive_deceptive": 4000},
+    "truthfulqa": {"honest_honest": 1201, "honest_deceptive": 1201, "deceptive_honest": 1201, "deceptive_deceptive": 1201},
+    "ultrachat": {"honest_honest": 4000, "honest_deceptive": 4000},
+    "werewolf": {"honest_honest": 1673, "honest_deceptive": 1673, "deceptive_honest": 1673, "deceptive_deceptive": 1673},
+    "wikihow": {"honest_honest": 880, "deceptive_deceptive": 880},
+    "wikihownest": {"honest_honest": 1990, "honest_deceptive": 1990, "deceptive_honest": 1990, "deceptive_deceptive": 1990}
+  },
+  "follow_up_pipeline_rows_total": 120432,
+  "follow_up_pipeline_rows": {
+    "anti": 7984, "b1-followup": 4488, "doluschat": 8000, "fabricated": 2164, "fever": 5752, "harm": 8000, "instructed": 6097,
+    "liarsbench": 7992, "lies": 6760, "longcontext": 43, "mask": 8000, "medqa": 4020, "model": 3304, "original": 4204,
+    "persona_prefill": 588, "sandbagging": 6700, "sycophancy": 7976, "synthetic": 7596, "truthfulqa": 4804, "ultrachat": 8000,
+    "wikihownest": 7960
+  },
+  "category_totals": {
+    "": 26590, "cat_A": 7847, "cat_Af": 10871, "cat_Af_bare": 3566, "cat_B": 11137, "cat_C": 5635, "cat_Cf": 6883, "cat_D": 4316,
+    "cat_E": 11042, "cat_F": 3735, "cat_G": 10479, "cat_H": 11329, "cat_Hf": 17321, "cat_I": 8046, "cat_J": 8225,
+    "cat_interleaved": 1476, "persona_final": 7412, "direct": 1771, "direct_mix": 4008, "direct_challenge": 368,
+    "meta_truthfulness": 213, "contradiction_probe": 204, "consequence_raise": 196, "third_party_appeal": 176, "influence_inquiry": 170
+  }
+}

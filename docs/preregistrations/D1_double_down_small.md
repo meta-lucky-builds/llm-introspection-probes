@@ -89,4 +89,14 @@ We expect G2 is the main risk: AISI's note on confession LoRAs suggests poor gen
 - One model.
 
 ## Change log
-None yet.
+All entries below were made before any D1 data was collected. The README section "D1" lists every implementation choice.
+
+2026-11-04, from the build:
+- **Family derivation.** `source` up to the first underscore, with `persona_prefill*` as one family. Held on a sample of about 960 rows across all 28 families; not verified exhaustively. The first run step checks a family-by-quadrant table against the published counts and stops before any GPU use if it does not match.
+- **Y and rows.** Y is the quadrant's first term, valid only on pipeline rows `cat_A`-`cat_J`, excluding delayed `cat_J`. Persona-final rows do not fit the follow-up structure and are excluded from scoring. Same-base rows merge, and conflicting labels are dropped.
+- **Prompt.** `messages[:-1]` plus our wording plus "Yes." or "No.", read at ".".
+- **Probe training target.** The second quadrant term, which is whether the labelled completion is false, as in FIBS. Contrast scoring turns this into a score for Y.
+- **Partition forced by the data.** 7 families have no follow-up rows, so they can only go to probe-train. About half of probe-train's 14 therefore hold rows, 2 of them tiny. This may weaken G1, and is reported.
+- **Conversation grouping.** Uses first user messages. Translated copies can escape it.
+- **14B.** Needs about 36 GB. On smaller cards the run fails rather than recording a finding, so a failure at this rung is a hardware limit, not a G1 result.
+- **Other.** Further related families, pooled AUROC, zero correlation assumed in sizing, a single retry shared across conditions, and LoRA hyperparameters as listed in the README.

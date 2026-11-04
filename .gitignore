@@ -7,3 +7,4 @@ dist/
 results/
 .venv/
 .e1_state/
+.d1_state/
