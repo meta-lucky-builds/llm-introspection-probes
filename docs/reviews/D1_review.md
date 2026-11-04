@@ -163,3 +163,22 @@ Nothing has run yet, including these tests. CI must be green before renting.
 2. Owner decides defect 6's silencing bar, and logs every change in the prereg's change log before any data.
 3. Fix 10, 11, 12 and 13 if time allows. 10 also shrinks the disk problem.
 4. CI green, then run `prepare` on a cheap machine to see the count check pass.
+
+## Second pass
+
+Commit 67a311a, by reading only. Nothing ran except `bash -n`, so transformers 5.22, accelerate and the FIBS `language` values are unconfirmed. The dry run exercises the load and hook path before any long stage.
+
+**Change-log rules: all implemented as written.** G2 (`gates.py:89-96`, `analysis.py:108-126`, residual at `analysis.py:305`), sham flag (`analysis.py:357-374`, `gates.py:162-166`), probe floor and probe unusable (`gates.py:145-151`), verbal and strong (`gates.py:154-159`), line-of-work bootstrap (`stats.py:104-112`), FLIP and HONEST only after all seeds pass (`orchestrator.py:494-498`).
+
+**First minutes: no run-stopping defect found.**
+- accelerate is installed (`run_d1_gpu.sh:563`) and probed (`:487`), so a venv without it is rebuilt. It also pulls torch from PyPI where the machine has none. That costs minutes, and `install_torch` replaces it if unusable.
+- With one device in the map no dispatch hooks should attach, and the LoRA hooks sit on inner linears either way. `produce.py:52-60` is fine on paper.
+- Step 2 runs on a bare Python, and its import chain is standard library only.
+- Disk gates at 1.7B, 4B and 8B work out at about 14, 21 and 37 GB of free disk, and about 33, 45 and 71 GB in total through the ladder. RAM only stops below 8 GB on one GPU. All consistent with the rung arithmetic.
+- Low risk: `preflight.py:201-203` has no out-of-memory guard, while capture and `preflight.py:271-276` lower the budget instead. An out-of-memory error there ends the run in minutes, on a card capture could have managed. Unlikely at the configured `gpu_gb`.
+
+**Wrong verdicts: none silent.**
+- Specificity is mechanical and exactly balanced as a set (`specificity.py:98-105`). Not per question: English-only selection (`:84`) makes the English questions always Yes and the French and Spanish ones always No. A Yes bias still scores 0.50.
+- `messages[-1]` is always the base assistant turn (`data.py:109-115`).
+- No path reaches `full_analysis` without `run_gates` passing, on a re-analysis too (`orchestrator.py:551-563`).
+- One gap, flagged and not silent: if the unmodified model scores 0.60 or less on specificity, a general Yes bias passes G2 with only a warning (`gates.py:92`, `analysis.py:690`). The dry run prints that number before adapters are paid for (`preflight.py:216`), so stop there if it is low.
