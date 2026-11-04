@@ -66,9 +66,9 @@ Stage 3 (`session.py`, `analysis.py`).
 - Holm covers each bound a rule must clear: the J-minus-residual gap, and `L(F) - 0.5 L(F_full)` for F_j, F_res and F_rand, over the cells where the rule can be evaluated. E1 left share bounds unadjusted, so `classification_without_holm` is reported beside the result.
 - An unmatched F_rand leaves H3 untested, and the cell is still classified on H1 and H2, with `h3_testable` false. An unmatched F_j or F_res gives mixed, with `routes_testable` false.
 
-## Entries for the prereg's change log
+## Entries in the prereg's change log
 
-The prereg is not edited by this work. These need logging before data is collected:
+All of these are logged there:
 
 1. Chinese targets: the evaluation sets hold none, so `chinese_targets.json` is my own table. Descriptive only.
 2. Order-ops synonyms: upstream describes them but does not publish them, so `order_ops_synonyms.json` is mine. It affects the gate.

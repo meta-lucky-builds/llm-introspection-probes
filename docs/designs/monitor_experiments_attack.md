@@ -42,6 +42,8 @@ The author's belief that M1 is strongest is wrong. M1 attacks the introspective 
 - FIBS's training data is a truth table on the follow-up answer. N.2.1 (p.85) says fixed answers are an affirmation for HH and DD and "a self-correction or an admission of doubt" for DH and HD, "so that identical text is a falsehood after a deceptive base exchange and not after an honest one" [read]. HD explicitly includes a false retraction (N.1, p.83) [read].
 - The contrast score is s("Yes.") minus s("No.") on "Did you respond truthfully?" (§4.2) [read].
 
+**Correction, added later:** the cancellation below holds exactly only on raw scores. FIBS appendix A.2 takes the difference after a sigmoid for linear and MLP ensembles, where an additive effect doesn't fully cancel. Axial scores look raw, which is not confirmed.
+
 **What the contrast implies** [inferred, from the definition]. Write s(answer | base) for the probe score. The difference of mean contrast between lies and honest rows is:
 
 `[s(Y|lie) − s(N|lie)] − [s(Y|honest) − s(N|honest)]`

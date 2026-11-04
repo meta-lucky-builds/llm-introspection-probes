@@ -12,6 +12,7 @@ Already covered elsewhere and not redone: docs/literature/j_space_and_recent_wor
 
 1. j_space_and_recent_work.md item 1 says the fine-tuned detectors were run on "Gemma-3 4B-27B, Qwen3 80B/235B, GPT-OSS 20B/120B". The blog says those larger models were used to GENERATE lies. The fine-tuned detectors were Gemma-3 family. Larger-model detectors are "inconclusive" per the fetch [web-summary]. The 0.98-0.99 for Qwen3-235B is a PROMPTED detector, not a fine-tuned one.
 2. The existing note says "defection probes AUROC 99.3% ... 95.3% for best random direction". Confirmed from the Anthropic page [web-summary]; the 95.3% is the best of 1,000 random directions.
+4. Below, open question 2 says FIBS and AISI differ in base models and that no source reconciles them. Both are wrong. All eight FIBS organisms are on Qwen3.6-27B, and seven are AISI's published ones. FIBS §5.2 and appendix I compare the two: median AUROC 0.94 against 0.75, with architecture accounting for 0.09 of the gap and the rest not separated.
 3. open_problems_and_compute.md says AuditBench base models and release location were "not retrieved". Now found: HF org `auditing-agents` (section 6).
 
 ## 1. Anthropic, "Fine-Tuned Lie Detectors Failed to Generalize" [web-summary]
