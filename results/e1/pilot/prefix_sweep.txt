@@ -1,0 +1,27 @@
+mass on label ids 15-24 at last position (pilot cluster pilot_sky, clean, no injection)
+cand valid T_inj    T_pick   T_fav    T_odd    T_fact    min
+A    True  0.7490   0.3327   0.9483   0.2185   0.7303    0.2185   'Position number:\n'
+B    True  1.0000   0.9999   1.0000   0.9998   1.0000    0.9998   'Position number: '
+C    True  1.0000   0.9997   0.9999   0.9998   1.0000    0.9997   'The position number is '
+D    True  1.0000   1.0000   1.0000   1.0000   1.0000    1.0000   'Answer: position '
+top5 tokens:
+  A T_inj   ['9', '0', '**', '8', '7']
+  A T_pick  ['**', '7', '8', '9', '6']
+  A T_fav   ['9', '8', '7', '**', '0']
+  A T_odd   ['**', '0', '8', '7', '9']
+  A T_fact  ['0', '**', '9', '7', '8']
+  B T_inj   ['0', '1', '2', '5', '3']
+  B T_pick  ['7', '2', '5', '0', '8']
+  B T_fav   ['9', '7', '0', '1', '5']
+  B T_odd   ['0', '5', '4', '1', '6']
+  B T_fact  ['0', '1', '2', '4', '3']
+  C T_inj   ['0', '1', '2', '5', '3']
+  C T_pick  ['0', '7', '2', '5', '8']
+  C T_fav   ['0', '9', '1', '7', '2']
+  C T_odd   ['0', '5', '1', '9', '4']
+  C T_fact  ['0', '1', '2', '3', '4']
+  D T_inj   ['1', '0', '2', '3', '5']
+  D T_pick  ['7', '2', '5', '9', '3']
+  D T_fav   ['9', '1', '7', '0', '3']
+  D T_odd   ['9', '0', '5', '1', '8']
+  D T_fact  ['0', '1', '2', '3', '4']

@@ -28,6 +28,9 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 - Keep findings in the repo, not in the conversation. Have agents write notes to files and return short summaries.
 - Read only the parts of files and papers that a decision needs.
 
+## Focus (owner's instruction, 2026-11-04)
+Only small-scale Double-Down: test the same question at the smallest scale that is still reliable, with useful extra comparisons, keeping it small. Everything else is paused, including E1's large tier, E2 and the other monitor designs. Sections below on those describe paused work.
+
 ## Current state
 - Branch: `research/e1-localization-capture`.
 - E1 preregistered ([prereg](preregistrations/E1_localization_capture.md)); no data collected.

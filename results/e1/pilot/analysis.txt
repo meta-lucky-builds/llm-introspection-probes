@@ -1,0 +1,583 @@
+{
+ "clean": [
+  [
+   "T_fact",
+   "pilot_plants",
+   10,
+   1.0,
+   null,
+   10,
+   null
+  ],
+  [
+   "T_fav",
+   "pilot_plants",
+   1,
+   1.0,
+   null,
+   null,
+   null
+  ],
+  [
+   "T_inj",
+   "pilot_plants",
+   1,
+   1.0,
+   null,
+   null,
+   null
+  ],
+  [
+   "T_inj_none",
+   "pilot_plants",
+   1,
+   0.1521,
+   0.423,
+   null,
+   1
+  ],
+  [
+   "T_odd",
+   "pilot_plants",
+   1,
+   0.9999,
+   null,
+   null,
+   null
+  ],
+  [
+   "T_pick",
+   "pilot_plants",
+   1,
+   0.9999,
+   null,
+   null,
+   null
+  ]
+ ],
+ "clean_columns": [
+  "task",
+  "cluster",
+  "n",
+  "label_mass",
+  "none_mass",
+  "fact_correct",
+  "none_answers"
+ ],
+ "dropped_clusters": [],
+ "dropped_tasks": [],
+ "dropped_words": {
+  "pilot_pets": [
+   "zebra"
+  ],
+  "pilot_plants": [
+   "tulip",
+   "petal"
+  ],
+  "pilot_pockets": [
+   "earring"
+  ],
+  "pilot_sky": [
+   "puddle"
+  ]
+ },
+ "estimates": {
+  "by_condition": {
+   "T_fact|concept": {
+    "L": {
+     "hi": 2.85162,
+     "lo": 1.09044,
+     "p": 0.0009995002498750624,
+     "point": 1.97103
+    },
+    "hit": {
+     "hi": 0.0,
+     "lo": 0.0,
+     "p": 1.0,
+     "point": 0.0
+    },
+    "hit_minus_clean": {
+     "hi": 0.0,
+     "lo": 0.0,
+     "p": 1.0,
+     "point": 0.0
+    },
+    "injected_label_mass": {
+     "hi": 1.0,
+     "lo": 1.0,
+     "p": 0.0009995002498750624,
+     "point": 1.0
+    }
+   },
+   "T_fav|concept": {
+    "L": {
+     "hi": 2.34773,
+     "lo": 0.9420300000000001,
+     "p": 0.0009995002498750624,
+     "point": 1.64488
+    },
+    "hit": {
+     "hi": 0.6,
+     "lo": 0.0,
+     "p": 0.5097451274362819,
+     "point": 0.3
+    },
+    "hit_minus_clean": {
+     "hi": 0.39999999999999997,
+     "lo": 0.0,
+     "p": 0.5097451274362819,
+     "point": 0.19999999999999998
+    },
+    "injected_label_mass": {
+     "hi": 1.0,
+     "lo": 1.0,
+     "p": 0.0009995002498750624,
+     "point": 1.0
+    }
+   },
+   "T_inj_none|concept": {
+    "L": {
+     "hi": 0.17303,
+     "lo": 0.1633,
+     "p": 0.0009995002498750624,
+     "point": 0.16816499999999998
+    },
+    "hit": {
+     "hi": 0.0,
+     "lo": 0.0,
+     "p": 1.0,
+     "point": 0.0
+    },
+    "hit_minus_clean": {
+     "hi": 0.0,
+     "lo": 0.0,
+     "p": 1.0,
+     "point": 0.0
+    },
+    "injected_label_mass": {
+     "hi": 0.173,
+     "lo": 0.1542,
+     "p": 0.0009995002498750624,
+     "point": 0.16360000000000002
+    }
+   },
+   "T_inj|concept": {
+    "L": {
+     "hi": 1.74701,
+     "lo": 0.83532,
+     "p": 0.0009995002498750624,
+     "point": 1.291165
+    },
+    "hit": {
+     "hi": 0.8,
+     "lo": 0.6,
+     "p": 0.0009995002498750624,
+     "point": 0.7
+    },
+    "hit_minus_clean": {
+     "hi": 0.6000000000000001,
+     "lo": 0.6,
+     "p": 0.0009995002498750624,
+     "point": 0.6
+    },
+    "injected_label_mass": {
+     "hi": 1.0,
+     "lo": 1.0,
+     "p": 0.0009995002498750624,
+     "point": 1.0
+    }
+   },
+   "T_inj|random_impact": {
+    "L": {
+     "hi": 1.01846,
+     "lo": 0.76704,
+     "p": 0.0009995002498750624,
+     "point": 0.89275
+    },
+    "hit": {
+     "hi": 0.4,
+     "lo": 0.2,
+     "p": 0.0009995002498750624,
+     "point": 0.3
+    },
+    "hit_minus_clean": {
+     "hi": 0.2,
+     "lo": 0.19999999999999998,
+     "p": 0.0009995002498750624,
+     "point": 0.19999999999999998
+    },
+    "injected_label_mass": {
+     "hi": 1.0,
+     "lo": 1.0,
+     "p": 0.0009995002498750624,
+     "point": 1.0
+    }
+   },
+   "T_inj|random_norm": {
+    "L": {
+     "hi": 1.01846,
+     "lo": 0.76704,
+     "p": 0.0009995002498750624,
+     "point": 0.89275
+    },
+    "hit": {
+     "hi": 0.4,
+     "lo": 0.2,
+     "p": 0.0009995002498750624,
+     "point": 0.3
+    },
+    "hit_minus_clean": {
+     "hi": 0.2,
+     "lo": 0.19999999999999998,
+     "p": 0.0009995002498750624,
+     "point": 0.19999999999999998
+    },
+    "injected_label_mass": {
+     "hi": 1.0,
+     "lo": 1.0,
+     "p": 0.0009995002498750624,
+     "point": 1.0
+    }
+   },
+   "T_odd|concept": {
+    "L": {
+     "hi": 3.3905000000000003,
+     "lo": 2.65119,
+     "p": 0.0009995002498750624,
+     "point": 3.020845
+    },
+    "hit": {
+     "hi": 0.6,
+     "lo": 0.4,
+     "p": 0.0009995002498750624,
+     "point": 0.5
+    },
+    "hit_minus_clean": {
+     "hi": 0.6,
+     "lo": 0.2,
+     "p": 0.0009995002498750624,
+     "point": 0.4
+    },
+    "injected_label_mass": {
+     "hi": 0.9999,
+     "lo": 0.9999,
+     "p": 0.0009995002498750624,
+     "point": 0.9999
+    }
+   },
+   "T_pick|concept": {
+    "L": {
+     "hi": 2.58714,
+     "lo": 1.19754,
+     "p": 0.0009995002498750624,
+     "point": 1.8923400000000001
+    },
+    "hit": {
+     "hi": 0.8,
+     "lo": 0.0,
+     "p": 0.5097451274362819,
+     "point": 0.4
+    },
+    "hit_minus_clean": {
+     "hi": 0.6000000000000001,
+     "lo": 0.0,
+     "p": 0.5097451274362819,
+     "point": 0.30000000000000004
+    },
+    "injected_label_mass": {
+     "hi": 0.9999,
+     "lo": 0.9999,
+     "p": 0.0009995002498750624,
+     "point": 0.9999
+    }
+   }
+  },
+  "controls": {
+   "T_fav": {
+    "L": {
+     "hi": 2.34773,
+     "lo": 0.9420300000000001,
+     "p": 0.0009995002498750624,
+     "point": 1.64488
+    },
+    "L_holm_p": 0.0029985007496251873,
+    "L_inj_minus_L": {
+     "hi": -0.1067100000000002,
+     "lo": -0.6007199999999999,
+     "p": 0.0009995002498750624,
+     "point": -0.353715
+    },
+    "gap_holm_p": 0.0029985007496251873,
+    "share": {
+     "hi": 1.3438560740923062,
+     "lo": 1.127747450079012,
+     "point": 1.2739502697176581,
+     "undefined_fraction": 0.0
+    }
+   },
+   "T_odd": {
+    "L": {
+     "hi": 3.3905000000000003,
+     "lo": 2.65119,
+     "p": 0.0009995002498750624,
+     "point": 3.020845
+    },
+    "L_holm_p": 0.0029985007496251873,
+    "L_inj_minus_L": {
+     "hi": -1.6434900000000003,
+     "lo": -1.8158700000000003,
+     "p": 0.0009995002498750624,
+     "point": -1.72968
+    },
+    "gap_holm_p": 0.0029985007496251873,
+    "share": {
+     "hi": 3.173861514150266,
+     "lo": 1.9407444719835607,
+     "point": 2.339627390767253,
+     "undefined_fraction": 0.0
+    }
+   },
+   "T_pick": {
+    "L": {
+     "hi": 2.58714,
+     "lo": 1.19754,
+     "p": 0.0009995002498750624,
+     "point": 1.8923400000000001
+    },
+    "L_holm_p": 0.0029985007496251873,
+    "L_inj_minus_L": {
+     "hi": -0.3622200000000001,
+     "lo": -0.8401300000000003,
+     "p": 0.0009995002498750624,
+     "point": -0.6011750000000002
+    },
+    "gap_holm_p": 0.0029985007496251873,
+    "share": {
+     "hi": 1.4808959307617016,
+     "lo": 1.4336302255423072,
+     "point": 1.465606642063563,
+     "undefined_fraction": 0.0
+    }
+   }
+  },
+  "fact_accuracy_under_injection": {
+   "hi": 1.0,
+   "lo": 1.0,
+   "p": 0.0009995002498750624,
+   "point": 1.0
+  },
+  "fact_interference": {
+   "hi": 0.0,
+   "lo": 0.0,
+   "p": 1.0,
+   "point": 0.0
+  },
+  "h3": {
+   "concept_minus_impact": {
+    "hi": 0.72855,
+    "lo": 0.0682799999999999,
+    "p": 0.0009995002498750624,
+    "point": 0.39841499999999985
+   },
+   "concept_minus_norm": {
+    "hi": 0.72855,
+    "lo": 0.0682799999999999,
+    "p": 0.0009995002498750624,
+    "point": 0.39841499999999985
+   },
+   "impact_minus_norm": {
+    "hi": 0.0,
+    "lo": 0.0,
+    "p": 1.0,
+    "point": 0.0
+   }
+  }
+ },
+ "gates": {
+  "V1": {
+   "accuracy": 1.0,
+   "n": 10,
+   "passed": true
+  },
+  "V2": {
+   "L_inj": {
+    "hi": 1.74701,
+    "lo": 0.83532,
+    "p": 0.0009995002498750624,
+    "point": 1.291165
+   },
+   "accuracy": {
+    "hi": 0.8,
+    "lo": 0.6,
+    "p": 0.0009995002498750624,
+    "point": 0.7
+   },
+   "passed": true
+  }
+ },
+ "impact_match": {
+  "achieved_js": 0.27795297864720214,
+  "alpha_impact": 6.0,
+  "alpha_norm": 6.0,
+  "history": [
+   {
+    "alpha": 6.0,
+    "js": 0.27795297864720214
+   }
+  ],
+  "key": "impact_match",
+  "kind": "impact_match",
+  "match_ok": true,
+  "relative_error": 0.059474028623027975,
+  "scale": 1.0,
+  "target_js": 0.26234996907706243,
+  "tolerance": 0.1
+ },
+ "label_mass": {
+  "clean_by_task": {
+   "T_fact": 1.0,
+   "T_fav": 1.0,
+   "T_inj": 1.0,
+   "T_inj_none": 0.1521,
+   "T_odd": 0.9999,
+   "T_pick": 0.9999
+  },
+  "injected": {
+   "T_fact|concept": {
+    "hi": 1.0,
+    "lo": 1.0,
+    "p": 0.0009995002498750624,
+    "point": 1.0
+   },
+   "T_fav|concept": {
+    "hi": 1.0,
+    "lo": 1.0,
+    "p": 0.0009995002498750624,
+    "point": 1.0
+   },
+   "T_inj_none|concept": {
+    "hi": 0.173,
+    "lo": 0.1542,
+    "p": 0.0009995002498750624,
+    "point": 0.16360000000000002
+   },
+   "T_inj|concept": {
+    "hi": 1.0,
+    "lo": 1.0,
+    "p": 0.0009995002498750624,
+    "point": 1.0
+   },
+   "T_inj|random_impact": {
+    "hi": 1.0,
+    "lo": 1.0,
+    "p": 0.0009995002498750624,
+    "point": 1.0
+   },
+   "T_inj|random_norm": {
+    "hi": 1.0,
+    "lo": 1.0,
+    "p": 0.0009995002498750624,
+    "point": 1.0
+   },
+   "T_odd|concept": {
+    "hi": 0.9999,
+    "lo": 0.9999,
+    "p": 0.0009995002498750624,
+    "point": 0.9999
+   },
+   "T_pick|concept": {
+    "hi": 0.9999,
+    "lo": 0.9999,
+    "p": 0.0009995002498750624,
+    "point": 0.9999
+   }
+  },
+  "note": "Descriptive. Mass is not used by any gate, rule or filter. T_inj_none also puts mass on none."
+ },
+ "meta": {
+  "commit": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "complete": true,
+  "config_hash": "f812233eaaff49cbb6e2ea86a1d339225b7503433bbe1dc08d9186f25477f478",
+  "data_sha256": "1afe0bbabb296f9e2387e66437f34d26648f60a025d6e0065fb8ecf2635f8dbb",
+  "environments": [
+   {
+    "code_hash": "f8502e0acda6f24339c00c3204f259e341e71dc2f21341ee169c827cb5aea359",
+    "config_hash": "f812233eaaff49cbb6e2ea86a1d339225b7503433bbe1dc08d9186f25477f478",
+    "data_sha256": "1afe0bbabb296f9e2387e66437f34d26648f60a025d6e0065fb8ecf2635f8dbb",
+    "device_type": "cpu",
+    "dtype": "torch.float32",
+    "model_commit": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "versions": {
+     "numpy": "2.4.6",
+     "python": "3.13.18",
+     "tokenizers": "0.23.3",
+     "torch": "2.11.0+cpu",
+     "transformers": "5.22.0"
+    }
+   }
+  ],
+  "inference_allowed": false,
+  "min_denominator": 0.05,
+  "model": "Qwen/Qwen3-0.6B",
+  "n_bootstrap": 2000,
+  "n_records": 153,
+  "n_sessions": 2,
+  "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "screen_top_fraction": null,
+  "seed": 20261104,
+  "tier": "pilot",
+  "versions": {
+   "device": "cpu",
+   "numpy": "2.4.6",
+   "platform": "Linux-6.6.159+-x86_64-with-glibc2.39",
+   "python": "3.13.18",
+   "threads": 1,
+   "tokenizers": "0.23.3",
+   "torch": "2.11.0+cpu",
+   "transformers": "5.22.0"
+  }
+ },
+ "outcome": "pilot_not_for_inference",
+ "selection": {
+  "accuracy": 0.9,
+  "alpha": 6.0,
+  "grid_accuracy": {
+   "3|3": 0.8,
+   "3|6": 0.9,
+   "9|3": 0.1,
+   "9|6": 0.1
+  },
+  "key": "selection",
+  "kind": "selection",
+  "layer": 3,
+  "n_trials_per_point": 10
+ },
+ "sham": {
+  "key": "sham",
+  "kind": "sham",
+  "max_abs_L": 0.0,
+  "n": 4
+ },
+ "small_sample_caveat": {
+  "approx_coverage_if_cluster_variance_dominates": null,
+  "approx_coverage_if_concept_variance_dominates": 0.601415,
+  "n_clusters": 1,
+  "n_concepts": 2
+ },
+ "vector_diagnostics": {
+  "3": {
+   "mean_pairwise_cosine": 0.1858443021774292,
+   "mean_raw_norm": 2.0436305105686188,
+   "mean_raw_norm_over_activation_norm": 0.14689188832785302
+  },
+  "9": {
+   "mean_pairwise_cosine": 0.1515810489654541,
+   "mean_raw_norm": 5.729699730873108,
+   "mean_raw_norm_over_activation_norm": 0.20089728023425968
+  }
+ },
+ "verdicts": null,
+ "warnings": [
+  "percentile intervals undercover with 2 concepts and 1 clusters: nominal 95% is about 0.601415 if concept variance dominates and about None if cluster variance dominates, in the direction of finding effects"
+ ]
+}

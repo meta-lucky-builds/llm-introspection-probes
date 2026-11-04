@@ -4,9 +4,9 @@ One line per hypothesis. Update status with a link to evidence. Refuted hypothes
 
 | ID | Hypothesis | Status | Where |
 |---|---|---|---|
-| E1-H1 | Injected-position advantage also appears on tasks that do not mention injection (salience capture) | Preregistered, not run | [prereg](preregistrations/E1_localization_capture.md) |
-| E1-H2 | An ordinary-language "which does not belong" question gives as large an advantage as the injection question | Preregistered, not run | same |
-| E1-H3 | Impact-matched random directions localize better than norm-matched ones | Preregistered, not run | same |
+| E1-H1 | Injected-position advantage also appears on tasks that do not mention injection (salience capture) | Mixed on Qwen3-1.7B: T_pick capture, T_fav mixed. Large tier paused | [results](../results/e1/small_qwen3_1.7b/RESULTS.md), [prereg](preregistrations/E1_localization_capture.md) |
+| E1-H2 | An ordinary-language "which does not belong" question gives as large an advantage as the injection question | Supported on Qwen3-1.7B | same |
+| E1-H3 | Impact-matched random directions localize better than norm-matched ones | Untested: impact match missed tolerance | same |
 | E2-Gate | The J-lens beats the logit lens on Qwen3-4B | Preregistered, not run | [prereg](preregistrations/E2_jspace_vector_families.md) |
 | E2-H1/H2/H3 | Injected-position advantage travels through the J-space component, the residual, or impact alone | Preregistered, not run | same |
 | E2-H4 | The asked-about report and capture use different routes | Preregistered, not run | same |
