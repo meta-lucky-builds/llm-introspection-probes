@@ -70,8 +70,8 @@ Stage 3 (`session.py`, `analysis.py`).
 
 The prereg is not edited by this work. These need logging before data is collected:
 
-1. Chinese targets: the evaluation sets hold none, so `chinese_targets.json` is our own table. Descriptive only.
-2. Order-ops synonyms: upstream describes them but does not publish them, so `order_ops_synonyms.json` is ours. It affects the gate.
+1. Chinese targets: the evaluation sets hold none, so `chinese_targets.json` is my own table. Descriptive only.
+2. Order-ops synonyms: upstream describes them but does not publish them, so `order_ops_synonyms.json` is mine. It affects the gate.
 3. Tolerance: the prereg says both "E1's tolerance" (5% at the large tier) and "the 10% tolerance". Resolved as above.
 4. The gate's band reading, and pooled recall.
 5. Holm's scope, including the ratio bounds, and the treatment of unmatched families.

@@ -44,13 +44,13 @@ None of these is a new measurement on a model. The [findings log](docs/FINDINGS.
 
 | Finding | Basis |
 |---|---|
-| **Hahami et al.'s r = 0.999 yes-bias correlation spans a wide dose grid**, so dose may dominate it. It doesn't by itself exclude a detection-specific effect within one setting. | Our reading of paper excerpts |
-| **No retrieved localization design has a control task that omits injection**, and the best published settings sit at the earliest layers at 3-6× norm. E1's question was open as far as we could find. | Paper excerpts, targeted search |
+| **Hahami et al.'s r = 0.999 yes-bias correlation spans a wide dose grid**, so dose may dominate it. It doesn't by itself exclude a detection-specific effect within one setting. | My reading of paper excerpts |
+| **No retrieved localization design has a control task that omits injection**, and the best published settings sit at the earliest layers at 3-6× norm. E1's question was open as far as I could find. | Paper excerpts, targeted search |
 | **The FIBS contrast score cancels any additive "goal is active" effect by construction**, so that alternative can't explain its headline number. FIBS's hidden-goal evaluation also filters out admissions before scoring. | Derivation, and a read of the paper |
 | **The lie-detector plateau near 0.70-0.75 may be partly a label ceiling.** With symmetric label noise ε, a true AUC of 0.917 at ε = 0.2 would show as 0.75. ε is not known. | Calculation on figures from a summarized web fetch |
-| **Published evasion of probes in our survey always needed a trigger, an instruction, a monitor-derived loss or a trained organism.** Whether plain "say you were truthful" training blinds a probe looks untested, and that is D1's question. | Literature survey; weak evidence of absence |
-| **Two published results on hidden-goal organisms conflict and nothing we read reconciles them:** FIBS reports 90.4-99.7% AUC on five of eight, and AISI reports 0.52-0.65 balanced accuracy for probes. | Paper excerpts; metrics and models differ |
-| **Review before data changed the designs.** One planned D1 verdict could pass with a dead probe, one gate could fail a model that always answered "Yes", and E2's residual family would be about 0.97 cosine to the full vector. | Review notes on our own designs |
+| **Published evasion of probes in my survey always needed a trigger, an instruction, a monitor-derived loss or a trained organism.** Whether plain "say you were truthful" training blinds a probe looks untested, and that is D1's question. | Literature survey; weak evidence of absence |
+| **Two published results on hidden-goal organisms conflict and nothing I read reconciles them:** FIBS reports 90.4-99.7% AUC on five of eight, and AISI reports 0.52-0.65 balanced accuracy for probes. | Paper excerpts; metrics and models differ |
+| **Review before data changed the designs.** One planned D1 verdict could pass with a dead probe, one gate could fail a model that always answered "Yes", and E2's residual family would be about 0.97 cosine to the full vector. | Review notes on my own designs |
 
 ## Status
 
@@ -82,7 +82,7 @@ Each experiment's guide has its run commands and every implementation choice.
 
 - **Decision rules come first.** Each experiment has a [preregistration](docs/preregistrations/) with a dated change log. Nulls and failed gates get reported as findings.
 - **Controls are part of the verdict.** E1 has competence and effect gates, a sham that must give exactly 0, and random directions. D1 has sham, flipped and honest adapters, plus text and shuffled-label baselines.
-- **Claims carry their evidence level.** Literature notes separate what was read in a paper, what came through a summarizer and what is our own inference.
+- **Claims carry their evidence level.** Literature notes separate what was read in a paper, what came through a summarizer and what is my own inference.
 - **Reviews are kept.** The [review notes](docs/reviews/) list defects, including ones still open.
 
 **About "independent review":** code, notes and reviews were written by Claude agents under the repository owner's direction. A review here means a separate agent reading the work fresh, not a human peer review. Nothing in this repository has been peer reviewed.

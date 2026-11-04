@@ -37,7 +37,7 @@ from ..sharding import sha256_file
 
 STORED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 FINAL_NORM_PATHS = ("model.norm", "model.language_model.norm", "language_model.norm", "transformer.ln_f")
-# Logits through our unembed against the model's own, on one prompt. Same operations, so only rounding can differ.
+# Logits through my unembed against the model's own, on one prompt. Same operations, so only rounding can differ.
 UNEMBED_TOLERANCE = 1e-2
 CHUNK_ROWS = 16384
 

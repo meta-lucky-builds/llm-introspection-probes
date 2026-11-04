@@ -5,7 +5,7 @@ Status: preregistered before any E1 small-tier or large-tier result was seen and
 ## Question
 E1 asks whether the injected position wins even on tasks that do not mention injection. It cannot say what carries the effect. Gurnee et al. (2607.15495) describe a J-space of verbalizable directions and argue it is causally used for reasoning and report. So: does the advantage depend on the part of the injected vector inside J-space, or on the rest?
 
-As far as we found, nobody has tested this for position localization, or on tasks that do not mention injection, or on open-weight models. See `docs/literature/j_space_and_recent_work.md`, whose caveat applies: only about 15 of about 100 pages of that paper were read.
+As far as I found, nobody has tested this for position localization, or on tasks that do not mention injection, or on open-weight models. See `docs/literature/j_space_and_recent_work.md`, whose caveat applies: only about 15 of about 100 pages of that paper were read.
 
 ## Stage 0: lens check
 Use the published Qwen3-4B J-lens if it was fit on the same checkpoint E1 uses. If not, fit one with `anthropics/jacobian-lens` on about 100 prompts, and record the difference. Record the fit data, the target layer and the file hash.
@@ -17,7 +17,7 @@ Using the evaluation sets in `anthropics/jacobian-lens`, measure intermediate-co
 
 **Gate passes** if, in some contiguous band of at least 3 layers, the lower bound of (J-lens minus logit-lens recall) is above 0. The band with the largest mean gain gives the workspace layer `l_w`, its middle layer. The band is fixed before Stage 3.
 
-**If the gate fails:** E2 stops. We record that the J-lens does not validate on Qwen3-4B, and no J-space claim is made for this model. Stages 2 and 3 do not run. This is a stop rule, not a reason to tune the lens.
+**If the gate fails:** E2 stops. I record that the J-lens does not validate on Qwen3-4B, and no J-space claim is made for this model. Stages 2 and 3 do not run. This is a stop rule, not a reason to tune the lens.
 
 ## Stage 2: decomposition of E1's vectors (descriptive)
 Requires E1 large-tier data. For each E1 test concept vector at E1's selected layer `l_s` and at `l_w`: top lens tokens, the k = 16 gradient-pursuit J-space component, and its share of the vector's squared norm. Spearman correlation across concepts between J-share and each of `L_inj` and `L_pick`, with bootstrap intervals over concepts.
@@ -54,7 +54,7 @@ Evaluated separately per site. Let `R(F, t) = L(F, t) / L(F_full, t)`, undefined
 
 **H4, dissociation.** T_inj is classified as H1 while T_pick is classified as H2 or H3. That would mean the asked-about report and the capture effect use different routes. Holm correction applies across the two sites and three tasks for each comparison.
 
-**Prior expectation, stated so it can be wrong.** At an early `l_s`, we expect H3 or H2, since the injection is large relative to the token and the lens is noisy there. At `l_w` we have no strong expectation.
+**Prior expectation, stated so it can be wrong.** At an early `l_s`, I expect H3 or H2, since the injection is large relative to the token and the lens is noisy there. At `l_w` I have no strong expectation.
 
 ## What each outcome does and does not show
 - **H1 on T_inj only:** evidence of a J-space route to the report on an open model. It does not establish a global workspace, or second-order monitoring.
@@ -76,13 +76,13 @@ All entries below were made before any E2 data was collected, and before any E1 
 - **Unmatched families.** If F_j, F_res, F_sham or F_rand misses the match, the affected test is reported as undetermined. Undetermined is distinct from mixed, and does not by itself trigger the stop rule.
 
 2026-11-04, implementation choices the text above left open:
-- **Chinese targets.** The published evaluation sets contain none, so our own table was written. Descriptive only; it does not enter the gate.
-- **Order-of-operations synonyms.** The published sets do not give them, so these are ours, and they affect the gate. Reported so the gate can be recomputed without them.
+- **Chinese targets.** The published evaluation sets contain none, so my own table was written. Descriptive only; it does not enter the gate.
+- **Order-of-operations synonyms.** The published sets do not give them, so these are mine, and they affect the gate. Reported so the gate can be recomputed without them.
 - **Impact tolerance.** The search stops at 5%; a family is excluded only above the prereg's 10%.
 - **Bands and pooling.** A band is a maximal run of qualifying layers; `l_w` is its middle layer, taking the lower of two for an even-length band. Recall is pooled over items.
 - **Holm.** Also applied to ratio bounds, with the unadjusted classification reported beside it.
 - **Readout position.** As fixed in the code and README, with prompt-plus-target tokenization.
 - **Stop rule reading.** Stated in the README.
 - **Collapsed sites.** If `l_s = l_w`, Stage 3 runs one site.
-- **Gradient pursuit.** Unit atoms, a final exact non-negative least squares step, special tokens excluded. The paper does not fix these details and no published code exists, so this decomposition is our implementation of its definition.
+- **Gradient pursuit.** Unit atoms, a final exact non-negative least squares step, special tokens excluded. The paper does not fix these details and no published code exists, so this decomposition is my implementation of its definition.
 - **Lens.** Fit on Qwen3-4B's newest commit, which E1 pins, so no refit branch is implemented. `norm` in the readout is the final RMSNorm, not unit normalization. The lens file is pinned by its LFS pointer's size and sha256.

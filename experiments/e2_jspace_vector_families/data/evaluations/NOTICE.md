@@ -13,4 +13,4 @@ Git blob SHA-1 of each file at that commit, which `tests/test_e2_data.py` checks
 | `lens-eval-poetry.json` | `5e06287e7fa49325506180aa4d2bb2a26ba29eaf` |
 | `lens-eval-typo.json` | `7354faf759764c5837285ae6d35ac854b89135e6` |
 
-`../order_ops_synonyms.json` and `../chinese_targets.json` are ours, not upstream's. No jacobian-lens code is vendored. `src/mechinterp/e2/lens.py` reimplements its readout and estimator in a few lines.
+`../order_ops_synonyms.json` and `../chinese_targets.json` are mine, not upstream's. No jacobian-lens code is vendored. `src/mechinterp/e2/lens.py` reimplements its readout and estimator in a few lines.

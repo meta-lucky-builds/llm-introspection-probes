@@ -71,7 +71,7 @@ Prereg line 72, `src/mechinterp/e2/stage1.py:207-209` and `:353-357`.
 
 The self-written synonyms enter the gate (55 of 552 items, half their intermediates). The prereg says the gate "can be recomputed without them". `ranks.jsonl` stores only the minimum over key and synonyms, so a keys-only gate cannot be recomputed. Dropping order-ops altogether is possible from the file, but `analyze_rows` does not do it. The only sensitivity it computes is for readout position.
 
-Both lenses are scored on the same tokens, so this is not a direct bias towards either. But the gain on operation words may depend on our word list.
+Both lenses are scored on the same tokens, so this is not a direct bias towards either. But the gain on operation words may depend on my word list.
 
 Fix, before Stage 1: store ranks per word and add `sensitivity_without_order_ops` and `sensitivity_keys_only`. Both gate nothing.
 

@@ -339,7 +339,7 @@ def analyze_rows(rows: Sequence[dict[str, Any]], layers: Sequence[int], e2: E2Co
         "decision": decision,
         "by_set": by_set,
         "chinese_targets": {
-            "note": "Descriptive. The evaluation sets hold no Chinese targets, so these come from our own frozen table.",
+            "note": "Descriptive. The evaluation sets hold no Chinese targets, so these come from my own frozen table.",
             "n_items_scored": len(chinese_kept),
             "table": recall_table(chinese_j, chinese_logit, layers, n_boot, seed) if len(chinese_kept) else None,
             "any_layer_pass_j": _any_layer_pass(rows, "j_chinese", k),

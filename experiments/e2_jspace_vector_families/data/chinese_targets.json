@@ -1,5 +1,5 @@
 {
-  "note": "The prereg asks to report Chinese targets too, but the upstream evaluation sets hold none. This table is ours, written by hand once before any E2 data and frozen. It decides nothing: only English targets decide the gate. Only single-token forms count at runtime, so coverage is partial and is reported. Words with no sensible translation (element letters, for example) are absent.",
+  "note": "The prereg asks to report Chinese targets too, but the upstream evaluation sets hold none. This table is mine, written by hand once before any E2 data and frozen. It decides nothing: only English targets decide the gate. Only single-token forms count at runtime, so coverage is partial and is reported. Words with no sensible translation (element letters, for example) are absent.",
   "table": {
     "3": ["三"], "4": ["四"], "5": ["五"], "6": ["六"], "7": ["七"], "8": ["八"], "9": ["九"], "10": ["十"],
     "11": ["十一"], "12": ["十二"], "13": ["十三"], "14": ["十四"], "15": ["十五"], "16": ["十六"], "20": ["二十"], "24": ["二十四"], "26": ["二十六"], "50": ["五十"], "52": ["五十二"],

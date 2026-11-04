@@ -49,7 +49,7 @@ The author's belief that M1 is strongest is wrong. M1 attacks the introspective 
 That is exactly the interaction term of goal condition by prefilled answer. An additive goal effect cancels. An additive answer effect becomes a constant, which AUROC ignores. So:
 
 1. **A purely additive "goal represented in me" probe scores AUROC 0.5 on the contrast arm.** The draft's main alternative, as worded, is already excluded for the headline 99.7% number, by construction.
-2. FIBS has reported the interaction but never its simple effects on organisms. We do not know whether the contrast is high because s(Yes) rises or because s(No) falls. Figure 24 does report "score at Yes" separately, for political-censorship only [read].
+2. FIBS has reported the interaction but never its simple effects on organisms. I do not know whether the contrast is high because s(Yes) rises or because s(No) falls. Figure 24 does report "score at Yes" separately, for political-censorship only [read].
 3. What survives is a *goal-active by affirmation* interaction: "Yes" looks false whenever the goal is live, whatever the prior sentence said.
 
 **The draft reads the wrong tokens.** It says "the probe scored on the answer's activations". The headline arm reads the follow-up turn, with the CoT elided and the denial only in context. The axial and EFC window is the final user turn plus the prefilled answer; linear and MLP read the full stop of "Yes." or "No." (README activation contract [read]). The no-follow-up arm is a separate result (Table 25, below).

@@ -4,7 +4,7 @@ Claims checked directly against paper text (excerpts returned by the alphaXiv PD
 
 ## Hahami et al., IFT (2607.14111v1)
 - **Confirmed:** r = 0.999 between detection and factual-no logit shifts on Llama-3.1-8B.
-- **The r is computed across (layer, strength) configurations.** Section 2.3.1 uses 40 configurations (8 layers, alpha 1-5). Appendix B uses layers {3,6,9} and alpha {5,10,50,250}. A correlation across a grid with this dose range is dominated by dose. It does not, alone, exclude a specific component within a configuration. Our reading, not the paper's.
+- **The r is computed across (layer, strength) configurations.** Section 2.3.1 uses 40 configurations (8 layers, alpha 1-5). Appendix B uses layers {3,6,9} and alpha {5,10,50,250}. A correlation across a grid with this dose range is dominated by dose. It does not, alone, exclude a specific component within a configuration. My reading, not the paper's.
 - **Same number, two meanings.** Main text: "mean net signal" -0.006 +/- 0.033, read as confound. Appendix B: "mean control net signal" -0.006 +/- 0.033, read as "genuine sensitivity ... not a general affirmative bias". These cannot both stand.
 - **Localization is called "immune" to global affirmative bias, with no control run for position-specific bias.** A perturbation at one position is not uniform, so immunity to a uniform shift says nothing about position-specific salience.
 - **Peak versus average differ greatly.** Table 2 baselines: Llama-3B avg localization 14.4% (chance 10%), best 100%. Llama-8B avg 16.8%, best 100%. The grid reaches alpha = 250.

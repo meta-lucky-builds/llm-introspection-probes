@@ -7,7 +7,7 @@ Models can name which position received an injected concept vector (Hahami 2607.
 
 If the injected position also wins when the prompt asks something unrelated, the "report" may be the perturbed position capturing attention, with no dependence on being asked. This is the localization analogue of the factual-no control that Hahami used against binary detection.
 
-As far as we could find (targeted search on 2026-11-04), this has not been tested. See `docs/literature/source_verification.md`.
+As far as I could find (targeted search on 2026-11-04), this has not been tested. See `docs/literature/source_verification.md`.
 
 ## Design
 Single forward pass, scored on first-token logits, no LLM judge.
@@ -65,7 +65,7 @@ The same rule is applied to T_fav. If T_pick and T_fav disagree, the result is c
 
 **H3, control strength.** Impact-matched random directions give a larger `L_inj` than norm-matched ones, narrowing the gap to concept vectors that Zou uses to argue against an anomaly detector. Supported if the lower bound of (impact-matched minus norm-matched) is above 0. Reported together with the remaining gap to concept vectors.
 
-**Prior expectation, stated so it can be wrong.** At the early-layer, high-strength settings Zou selected, we expect substantial capture (share at least 0.5). We are less sure at later layers.
+**Prior expectation, stated so it can be wrong.** At the early-layer, high-strength settings Zou selected, I expect substantial capture (share at least 0.5). I am less sure at later layers.
 
 ## What each outcome does and does not show
 - **Capture:** localization accuracy does not, by itself, evidence reporting on internal state. It does not refute Zou's head-level circuit, which could implement salience. It would mean that circuit needs a different reading.
@@ -110,3 +110,5 @@ All entries below were made before any data was collected.
 - **Large tier on 4x RTX 3090, Qwen3-4B only for now.** Multi-process execution across GPUs with trials assigned by SHA-256 of their key, config `large_4x3090.json` (batch size 64 rather than 32; design block identical, config hash differs), out-of-memory batch splitting, thread limits. The design, prompts, selection rule and statistics are unchanged. Clean logits are computed per GPU so injected rows pair within one GPU. GPUs are compared at the start of each stage: gaps above 0.01 logits are recorded in the results and analysis as a warning, since a steady offset cancels in `L`, and a warned run requires a per-GPU comparison before its result is read. Sham is checked early on every GPU: nonzero values below the harness limit of 1e-4 are recorded as warnings, and larger values abort. Llama-3.1-8B and Gemma-3-12B are deferred because they do not fit a 24 GB card at float32.
 - **Small-tier runtime.** The first estimate was about 3 hours; the dry run measured 21.5 s per prompt and at most 6.6 hours. Counts were kept, since they are already thin.
 - **Threads.** The small tier sets `OMP_NUM_THREADS=2` in the environment, since the default used one of two cores. No effect on results beyond float rounding.
+
+2026-11-04, after data, wording only, on the owner's request: first person plural became singular. No design, rule, stimulus or count changed.

@@ -48,7 +48,7 @@ Either outcome changes practice. Passing makes FIBS much stronger, because it ru
 
 If it breaks: activation monitoring remains the primary route, and "supervised self-report" is the likely weak point. If it holds with a matching text baseline: the limit is the categories or labels, and benchmark work is the priority.
 
-**Known threat.** Likely being tried by others, because the data is public. So speed matters, or this becomes a replication. Their numbers come from a blog we saw only through a summarizer. Exact folds are unknown, so "same split" can only be approximate.
+**Known threat.** Likely being tried by others, because the data is public. So speed matters, or this becomes a replication. Their numbers come from a blog I saw only through a summarizer. Exact folds are unknown, so "same split" can only be approximate.
 
 **Compute.** Forward passes over about 200,000 transcripts on Gemma-3-27B, or a subsample, plus probe training. 1-4 large GPUs.
 
@@ -62,7 +62,7 @@ If it breaks: activation monitoring remains the primary route, and "supervised s
 
 If it breaks: per-update re-validation becomes mandatory for anyone gating on probes. If robust: probes can be reused across updates, cutting monitoring cost.
 
-**Known threat.** 2606.15980 covers harmfulness, PII and refusal on 2B-7B models, but we found no deception number. OpenAI's post on transfer across post-training was seen only through a summary.
+**Known threat.** 2606.15980 covers harmfulness, PII and refusal on 2B-7B models, but I found no deception number. OpenAI's post on transfer across post-training was seen only through a summary.
 
 **Compute.** Light to moderate: 8B-27B, single GPU per fine-tune.
 

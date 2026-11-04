@@ -1,5 +1,5 @@
 {
-  "note": "Upstream's README expands order-ops intermediates to synonym sets (numbers to digit and word forms, operations to symbol and word forms) but does not publish the sets. This is ours, frozen before any E2 data. Only single-token forms count at runtime.",
+  "note": "Upstream's README expands order-ops intermediates to synonym sets (numbers to digit and word forms, operations to symbol and word forms) but does not publish the sets. This is mine, frozen before any E2 data. Only single-token forms count at runtime.",
   "table": {
     "3": ["three"],
     "4": ["four"],

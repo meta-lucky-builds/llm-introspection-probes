@@ -212,7 +212,7 @@ def remove_cross_partition(
     """A source prompt seen in two partitions stays in the one closer to test.
 
     The family partition handles known relations. This catches the rest, row by row: lies and mask are together, but
-    nothing has told us every family that shares a question. Probes and adapters therefore never see a test prompt.
+    nothing has told me every family that shares a question. Probes and adapters therefore never see a test prompt.
     """
     seen: dict[str, int] = {}
     for prompt, family in [
