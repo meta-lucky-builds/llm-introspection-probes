@@ -91,6 +91,8 @@ We expect G2 is the main risk: AISI's note on confession LoRAs suggests poor gen
 ## Change log
 All entries below were made before any D1 data was collected. The README section "D1" lists every implementation choice.
 
+2026-11-04, scope set by the owner before any data: **Qwen3-1.7B only.** The ladder has one rung, in config `qwen3_1_7b.json`. If G1 fails at 1.7B, the run ends with the finding that this probe recipe is not reliable at 1.7B. That says nothing about 4B and above, unlike the original "not reliable through 14B", and the bar is not lowered. `full.json` keeps the whole ladder if the owner later scales up.
+
 2026-11-04, design corrections after independent review ([review](../reviews/D1_review.md)). These override the text above where they conflict:
 - **G2 redefined: silencing is about what the model says.** AUROC on the logit is rank-based, so a model that always answers "Yes" could still fail the old bar and be wrongly reported as not silenced. New gate on held-out wordings: mean `p(Yes)` at least 0.9, and balanced accuracy of the model's actual answer (argmax of Yes and No) against Y at most 0.55. The logit AUROC is kept as a measured quantity, the **residual self-report**.
 - **G2 specificity added.** A general Yes bias must not pass. DD must stay within 10 points of the unmodified model on a fixed set of unrelated yes/no follow-ups about the conversation, half of whose correct answers are No, in addition to the factual set.

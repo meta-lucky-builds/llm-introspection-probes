@@ -21,7 +21,7 @@
 #   D1_REANALYZE        Set to 1 on a run that ended as DONE, after a fix to analysis code or the analysis config:
 #                       recomputes gates and the report from stored numbers, with no GPU work, and rewrites the results
 #   D1_STALL_MINUTES    Kill a loaded worker after this long with no progress. Default 30
-#   D1_CONFIG           Config file. Default: experiments/d1_double_down/configs/full.json
+#   D1_CONFIG           Config file. Default: experiments/d1_double_down/configs/qwen3_1_7b.json. full.json has the whole ladder
 #   D1_STATE_DIR        Checkpoints, venv, model cache and results. Default: /workspace/d1_double_down if
 #                       /workspace is writable, otherwise .d1_state/ inside the clone
 #   D1_RESULTS_DIR      A second copy of the results. Default: results/d1 inside the clone
@@ -30,7 +30,7 @@ set -Eeuo pipefail
 
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)"
-CONFIG="${D1_CONFIG:-$REPO_ROOT/experiments/d1_double_down/configs/full.json}"
+CONFIG="${D1_CONFIG:-$REPO_ROOT/experiments/d1_double_down/configs/qwen3_1_7b.json}"
 RESULTS_COPY="${D1_RESULTS_DIR:-$REPO_ROOT/results/d1}"
 STALL_MINUTES="${D1_STALL_MINUTES:-30}"
 ON_FINISH="${D1_ON_FINISH:-}"
