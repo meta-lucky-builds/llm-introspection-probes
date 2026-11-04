@@ -1,6 +1,6 @@
-# mechinterp
+# llm-introspection-probes
 
-[![tests](https://github.com/meta-lucky-builds/mechinterp/actions/workflows/tests.yml/badge.svg)](https://github.com/meta-lucky-builds/mechinterp/actions/workflows/tests.yml)
+[![tests](https://github.com/meta-lucky-builds/llm-introspection-probes/actions/workflows/tests.yml/badge.svg)](https://github.com/meta-lucky-builds/llm-introspection-probes/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Preregistered experiments on two linked questions:
@@ -100,7 +100,7 @@ docs/
   literature/          survey notes with reading-status tags
 experiments/           one guide, config set and data folder per experiment
 results/e1/            stored E1 exports and analysis
-src/mechinterp/        E1 harness; d1/ and e2/ for the other experiments
+src/mechinterp/        Python package: E1 harness, d1/ and e2/
 scripts/               one-command GPU runners, Colab bundler
 tests/                 run in CI on every push
 ```

@@ -1,6 +1,6 @@
 # Literature thread: do LLMs have privileged access to their own internal states, and how is it tested?
 
-Thread for meta-lucky-builds/mechinterp. Written 2026-11-04. No code written, no repo touched.
+Thread for meta-lucky-builds/llm-introspection-probes. Written 2026-11-04. No code written, no repo touched.
 
 ## Reading-status tags (honest definitions)
 - [read-excerpts] = retrieved via the alphaXiv PDF tool, which returns the most relevant pages (typically abstract, intro, methods, main results, limitations, parts of the appendix). I did NOT read every page of these papers. I use this tag where the task asked for [read-full], because I cannot truthfully claim full reads.

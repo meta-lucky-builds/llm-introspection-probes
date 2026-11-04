@@ -15,7 +15,7 @@ dependencies = ["torch>=2.6", "transformers>=4.55", "numpy", "jinja2"]
 test = ["pytest"]
 
 [project.urls]
-Repository = "https://github.com/meta-lucky-builds/mechinterp"
+Repository = "https://github.com/meta-lucky-builds/llm-introspection-probes"
 
 [tool.setuptools.packages.find]
 where = ["src"]

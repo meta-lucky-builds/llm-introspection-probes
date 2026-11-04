@@ -70,8 +70,8 @@ A results directory holds one run identity: code, config, data, model commit, dt
 In a terminal on the machine, for example a Jupyter terminal:
 
 ```bash
-git clone https://github.com/meta-lucky-builds/mechinterp.git
-bash mechinterp/scripts/run_e1_gpu.sh
+git clone https://github.com/meta-lucky-builds/llm-introspection-probes.git
+bash llm-introspection-probes/scripts/run_e1_gpu.sh
 ```
 
 No token is needed, because Qwen3-4B is ungated. There are no other steps.
@@ -92,7 +92,7 @@ Checkpoints, the venv, the model cache and the results go to `/workspace/e1_larg
 **Stopping the machine.** Rented machines have no common way to stop themselves, so set `E1_ON_FINISH` to a command that fits yours:
 
 ```bash
-E1_ON_FINISH='runpodctl stop pod "$RUNPOD_POD_ID"' bash mechinterp/scripts/run_e1_gpu.sh
+E1_ON_FINISH='runpodctl stop pod "$RUNPOD_POD_ID"' bash llm-introspection-probes/scripts/run_e1_gpu.sh
 ```
 
 It runs once, after the final state and results are saved, on both `DONE` and `FAILED`, because a failed run bills too. It can read `E1_FINAL_STATUS` to tell them apart. It does not run after an interruption from outside.
@@ -101,7 +101,7 @@ It runs once, after the final state and results are saved, on both `DONE` and `F
 
 - While a run is going, it attaches to it. Closing the browser tab or terminal does not stop the run.
 - After a crash, a preempted instance or a killed process, it resumes without repeating finished trials. A different number of GPUs is fine.
-- After `DONE` or `FAILED`, it prints that final state at once and starts nothing. To resume after `FAILED`, keeping finished trials, run `E1_RETRY=1 bash mechinterp/scripts/run_e1_gpu.sh`.
+- After `DONE` or `FAILED`, it prints that final state at once and starts nothing. To resume after `FAILED`, keeping finished trials, run `E1_RETRY=1 bash llm-introspection-probes/scripts/run_e1_gpu.sh`.
 
 **Limits, so that nothing bills forever.** A worker that dies is restarted up to 3 times. A loaded worker with no finished trial for 20 minutes (`E1_STALL_MINUTES`), or one still loading after 30, is killed and restarted once, and a second time ends the run as `FAILED`. Installs, downloads, the dry run and the results step all have time limits, and each says what timed out. A failed run writes no analysis: only a final merge whose trials exactly match the plan can mark a run complete. Worker logs are in `run/logs/` under the state directory.
 

@@ -11,7 +11,7 @@ E2 asks whether E1's injected-position advantage depends on the part of the vect
 On the machine that ran E1, once E1 is `DONE`:
 
 ```bash
-bash mechinterp/scripts/run_e2_gpu.sh
+bash llm-introspection-probes/scripts/run_e2_gpu.sh
 ```
 
 It refuses to start while E1's status is anything but `DONE`, while E1 holds a lock, or while an E1 process is alive. That includes an `E1_ON_FINISH` hook, so start E2 by hand rather than from one. It reuses E1's venv and model cache, and installs nothing. State goes in `e2_qwen3_4b/` inside E1's state directory, and results in `results/` there, copied to `results/e2/qwen3_4b/` in the clone, with `SHA256SUMS`. Detaching, resume, `E2_RETRY=1`, `E2_ON_FINISH` (with `E2_FINAL_STATUS`), bounded waits and the status banner work as in E1.
