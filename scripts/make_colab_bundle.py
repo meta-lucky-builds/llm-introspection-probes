@@ -1,6 +1,6 @@
 """Write a Colab cell that unpacks src/ and experiments/ from an embedded base64 zip.
 
-The repo is private and no token goes into Colab, so the code travels by paste.
+No token goes into Colab, so the code travels by paste.
 
     python scripts/make_colab_bundle.py [--out dist/colab_cell.py]
 

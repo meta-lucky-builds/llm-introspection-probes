@@ -89,7 +89,7 @@ We expect G2 is the main risk: AISI's note on confession LoRAs suggests poor gen
 - One model.
 
 ## Change log
-All entries below were made before any D1 data was collected. The README section "D1" lists every implementation choice.
+All entries below were made before any D1 data was collected. [The D1 guide](../../experiments/d1_double_down/README.md) lists every implementation choice.
 
 2026-11-04, parallel execution, on the owner's request, before any data. The science is unchanged:
 - **Speculative seeds and reads.** Other DD and SHAM seeds and probe reads may start before the first seed's G2 result, and are cancelled if it fails. Verdicts use only what the gates allow. FLIP and HONEST still wait for all DD and SHAM seeds to pass G2.

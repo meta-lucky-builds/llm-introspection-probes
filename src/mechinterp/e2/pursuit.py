@@ -2,7 +2,7 @@
 
 The paper says: the J-space component of x is the point nearest x among nonnegative combinations of at most k
 J-lens vectors, approximated "using gradient pursuit" (Blumensath and Davies). It publishes no code. Where the
-paper is silent, this module chooses, and README.md lists each choice:
+paper is silent, this module chooses, and experiments/e2_jspace_vector_families/README.md lists each choice:
 
 - Atoms are unit-normalized for selection. A J-lens vector has an arbitrary norm that mostly reflects token
   frequency, and pursuit assumes unit atoms. Scaling an atom leaves its cone unchanged, so only the selection

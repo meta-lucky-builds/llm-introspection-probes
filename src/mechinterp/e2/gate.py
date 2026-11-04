@@ -1,6 +1,6 @@
 """Stage 1's gate: J-lens versus logit-lens recall per layer, on numbers. No model code, and no torch.
 
-Readings of the prereg, each listed in README.md:
+Readings of the prereg, each listed in experiments/e2_jspace_vector_families/README.md:
 - A band is a maximal run of consecutive layers in which every layer's own lower bound clears 0. Sub-windows of
   a run are not separate bands, otherwise "largest mean gain" would always pick a narrow peak.
 - l_w is the middle layer of the winning band, and the lower of the two middles when its length is even.

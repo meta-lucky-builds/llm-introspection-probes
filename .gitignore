@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# Run output stays out by default. Results worth keeping are added with `git add -f`.
 results/
 .venv/
 .e1_state/

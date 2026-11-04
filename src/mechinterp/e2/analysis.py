@@ -2,7 +2,7 @@
 
 Estimand, bootstrap and intervals are E1's: the same cell export, CellTable and two-way resampling. numpy only.
 
-Readings of the prereg, each listed in README.md:
+Readings of the prereg, each listed in experiments/e2_jspace_vector_families/README.md:
 - R(F, t) is undefined, and the cell is "no effect to decompose", if L(F_full, t) is below 0.05 or its unadjusted
   lower bound is not above 0.
 - Holm runs "across the two sites and three tasks for each comparison". A comparison is any bound a rule needs

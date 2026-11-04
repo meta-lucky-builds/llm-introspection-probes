@@ -1,53 +1,42 @@
-# Mission status
+# Status
 
-Read this first when resuming. Keep it short and current. Last updated 2026-11-04.
+Last updated 2026-11-04. **Nothing is running.** Each next step below waits on the owner's go-ahead.
 
-## Mission
-Long-running research on alignment, mechanistic interpretability, safety, LLM behaviour and introspection. The owner is away and authorized autonomous, safe operation.
+## Where each experiment stands
 
-## Rules
-- Never run tests or experiments locally. Small experiments run on Colab through the Colab MCP. Large ones: write and push the code, and run them with the owner later. Unit tests run on GitHub Actions.
-- Colab, not Kaggle. Never put a token or secret in a Colab notebook. The repo is private, so code reaches Colab as a pasted bundle (`scripts/make_colab_bundle.py`), and results leave through cell output and get committed here.
-- Do not ask before creating branches, committing or pushing in this repo. Do not merge to `main` without the owner.
-- If compute fails, keep going: write code, push, move to other work.
-- Models: Opus 5.5 for implementation and thinking; Sonnet 5.5 to execute finished code, simple tasks and web search; Haiku 5.5 for simple retrieval. All at medium effort. Tell agents to use the how-to-think skill, and use it when forming hypotheses, planning, analyzing or designing.
-- Preregistrations are frozen once data collection starts. Report failures and nulls as they are.
+| Experiment | State | Blocking it |
+|---|---|---|
+| E1 small tier, Qwen3-1.7B | Done. H1 mixed, H2 supported, H3 uninformative | Nothing |
+| E1 large tier, Qwen3-4B | Written and reviewed, never run on a GPU | A rented GPU machine and the owner's go-ahead |
+| D1 Double-Down | Written and reviewed twice, never run on a GPU | Open defects below |
+| E2 J-space families | Paused. Code predates the corrected design | Open defects below |
+| M1' and M3' monitor controls | Design only, not preregistered | Paused |
 
-## Usage habits
-- Check plan usage before launching agents. At 90% of the 5-hour limit or above, or 85% of the weekly limit or above, start no new agents; finish what is running, save state here, and wait for the reset.
-- Scope agents narrowly. Send paper reading to agents rather than the coordinator, and do not repeat retrievals already recorded in `docs/literature/`.
+## Open defects
 
-## Avoiding local optima
-- Every experiment gets a stop rule before it runs: what result ends this line of work, and what comes next.
-- Do not tune a null into a positive. A failed preregistered test is logged and closed; a follow-up needs its own preregistration and a new reason.
-- After two consecutive experiments on one question teach nothing new, change the question, the method or the level of analysis.
-- At each result, reread the hypothesis ledger, add what the result suggests, and pick the next experiment by expected information per unit of compute. Keep the ledger spanning more than one research direction.
-- Pivoting changes what we study. It never relaxes rigor or these rules.
+**D1**, from the [parallel pass](reviews/D1_review.md#parallel-pass). Fix these before renting:
+1. **High.** One training out-of-memory error can stop all scheduling while the machine bills, for up to 168 hours (`orchestrator.py`, `_back_off` and `_choose_card`). Scope the memory factor to the failing task, retire idle workers, and add a no-progress limit.
+2. **Medium.** A dead tokenizer process can hang `plan` (`plan.py`, `Pool.map`).
+3. **Medium.** A failed speculative task ends the run (`orchestrator.py`, `_on_failure`).
+4. **Low.** Probe fits have a stall clock and no heartbeat.
 
-## Context habits
-- Keep findings in the repo, not in the conversation. Have agents write notes to files and return short summaries.
-- Read only the parts of files and papers that a decision needs.
+At D1's dry run, check two values: unmodified specificity above 0.60, and sham `p(Yes)` below 0.5. If either misses, a gate loses its meaning.
 
-## Focus (owner's instruction, 2026-11-04)
-Only small-scale Double-Down: test the same question at the smallest scale that is still reliable, with useful extra comparisons, keeping it small. Everything else is paused, including E1's large tier, E2 and the other monitor designs. Sections below on those describe paused work.
+D1's default config is Qwen3-1.7B, which the review guessed has under a 10% chance of passing G1. To scale up, `full.json` starts its ladder at 1.7B, so skipping rungs needs a new config.
 
-**D1 is ready to run, Qwen3-1.7B only (owner's decision).** Reviewed twice, CI green (623 passed, 1 expected failure in paused E2), repo public. Waiting on the owner to rent a GPU machine and run `scripts/run_d1_gpu.sh` from a fresh clone of this branch. Nothing is running on our side until then, so heartbeats end in one line. On return: commit results with `git add -f results/d1` (`results/` is ignored), apply the prereg's verdict rules, report any outcome including gate failures. Check the dry-run values first: specificity must exceed 0.60, or G2 cannot see a Yes bias.
+**E2**, from its [review](reviews/E2_review.md) and the prereg's change log:
+- Items 1-7 of the review, and the corrected design (F_sham, necessity and sufficiency, undetermined outcomes), are not implemented.
+- `tests/test_e2_data.py::test_all_six_sets_load_with_the_readme_rules` is a strict expected failure: 98 against 99 items in one evaluation set, unexplained.
 
-## Current state
-- Branch: `research/e1-localization-capture`.
-- E1 preregistered ([prereg](preregistrations/E1_localization_capture.md)); no data collected.
-- E1 harness written and reviewed; pilot passed on Qwen3-0.6B (results in `results/e1/pilot/`, pipeline check only).
+## Decisions for the owner
 
-## Next steps
-1. The E1 small tier (Qwen3-1.7B) is running on Colab as a background process (`/content/run_small.py`; status in `/content/e1_small.status`; up to about 6.6 h). Colab cell `Y3XFylVbUT9h` blocks until it finishes and prints the status. At heartbeats read only that cell's output, and never queue more cells while it runs, because they block the kernel. MCP cell calls time out at 120 s though the cell keeps running. Do not keep an agent polling; it burned the 5-hour limit.
-   Colab tools reset after a reconnect: call `open_colab_browser_connection`, then rewrite the cell, and check `/content/e1_small.status`.
-2. Save the export, analyze against the prereg's decision rules, update [hypotheses](hypotheses.md).
-   - E1 on the rented 4x RTX 3090 waits on the owner. The command is in the README. The owner has been told to save results and to ask before stopping the machine, so E2 can run on it if ready.
-   - **E2 needs fixes before it can run, not yet started.** After the 5-hour limit resets, start a FRESH Opus agent (resuming the builder is costly) to fix: `docs/reviews/E2_review.md` items 1-7 and the tests it lists; the prereg's change-log design correction (F_sham, necessity and sufficiency, undetermined outcome); and the failing test `tests/test_e2_data.py::test_all_six_sets_load_with_the_readme_rules` (98 vs 99 items: find out whether an item is being dropped). Then push, pass CI.
-   - Monitor experiments, decided after [the attack](designs/monitor_experiments_attack.md): **lead with Double-Down (D1)**, with a stop-loss gate on whether self-report actually collapses on held-out wordings. Run the repaired truth table M1' (B.7) as its cheap companion control, sharing reads. M2 is dead as a flagship. M3 survives only in narrowed form. Next: preregister D1 and M1' with the attack's preflights (verify the attack's artifact list and any claim the prereg leans on), have a fresh Opus agent build them, independent review, pass CI, then tell the owner the exact GPU needs. The attack's estimate is about 100-240 GPU-hours, about 3 days on 4x 80 GB, stop-loss near 24 GPU-hours; do not ask the owner to rent before the code is ready.
-3. Preregister and run the next candidate from the ledger; write GPU-tier code for later.
+- Which comes next: E1 on Qwen3-4B (recommended, since it tests the one real result at a published size) or D1 on a larger model.
+- Two inputs from the original request never arrived: the intended word behind the typo "sleep framework", and the two context files.
 
-## Waiting on the owner
-- What word "sleep framework" was a typo for.
-- The two context files mentioned in the original request, which never arrived.
-- A GPU runtime in Colab would widen what can run; optional.
+## Rules for this work
+
+- Tests and experiments run in the cloud, on GitHub Actions, Colab or a rented machine.
+- Tokens and secrets never go into a notebook, a config or this repo.
+- FIBS rows never enter this repo, because the dataset has no license tag.
+- Preregistrations are frozen once data collection starts. Failures and nulls are reported as they are, and a null isn't tuned into a positive.
+- Results are stored with `git add -f`, since `results/` is ignored to keep run output out by default.

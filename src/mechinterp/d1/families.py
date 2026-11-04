@@ -2,7 +2,7 @@
 
 Standard library only, so that a manifest can be checked without torch, numpy or the data.
 
-Why each rule exists is in the README's D1 section. In short:
+Why each rule exists is in experiments/d1_double_down/README.md. In short:
 - `family_of` is `source` up to the first underscore, except persona_prefill. Checked at run time against the exact
   family by quadrant table in the dataset's provenance/BUILD.json, and any difference stops the run.
 - The README says the first quadrant term labels the base turn. The FIBS paper (N.1) limits that to the 120,432 rows
