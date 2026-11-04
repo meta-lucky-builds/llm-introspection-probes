@@ -65,4 +65,16 @@ Evaluated separately per site. Let `R(F, t) = L(F, t) / L(F_full, t)`, undefined
 If the gate fails, or both sites come out H3 or mixed, close the J-space line for Qwen3 and pick the next ledger item. Ablation (a necessity test) runs only if Stage 3 finds H1 on some task.
 
 ## Change log
-None yet.
+All entries below were made before any E2 data was collected, and before any E1 small-tier or large-tier result was seen. The README section on E2 gives further detail.
+
+2026-11-04, implementation choices the text above left open:
+- **Chinese targets.** The published evaluation sets contain none, so our own table was written. Descriptive only; it does not enter the gate.
+- **Order-of-operations synonyms.** The published sets do not give them, so these are ours, and they affect the gate. Reported so the gate can be recomputed without them.
+- **Impact tolerance.** The search stops at 5%; a family is excluded only above the prereg's 10%.
+- **Bands and pooling.** A band is a maximal run of qualifying layers; `l_w` is its middle layer, taking the lower of two for an even-length band. Recall is pooled over items.
+- **Holm.** Also applied to ratio bounds, with the unadjusted classification reported beside it.
+- **Readout position.** As fixed in the code and README, with prompt-plus-target tokenization.
+- **Stop rule reading.** Stated in the README.
+- **Collapsed sites.** If `l_s = l_w`, Stage 3 runs one site.
+- **Gradient pursuit.** Unit atoms, a final exact non-negative least squares step, special tokens excluded. The paper does not fix these details and no published code exists, so this decomposition is our implementation of its definition.
+- **Lens.** Fit on Qwen3-4B's newest commit, which E1 pins, so no refit branch is implemented. `norm` in the readout is the final RMSNorm, not unit normalization. The lens file is pinned by its LFS pointer's size and sha256.

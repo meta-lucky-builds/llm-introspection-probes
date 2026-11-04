@@ -1,0 +1,52 @@
+{
+  "experiment": "E2",
+  "base_config": "../../e1_localization_capture/configs/large_4x3090.json",
+  "lens": {
+    "repo": "neuronpedia/jacobian-lens",
+    "commit": "e166deb5ad540932100ef803c8c9bcc2a5453694",
+    "filename": "qwen3-4b/jlens/Salesforce-wikitext/Qwen3-4B_jacobian_lens.pt",
+    "sha256": "9c94a43ac2db2debbab36acb74480f49a3ac411fb3d7fa8e5461377028e74606",
+    "size": 458762977,
+    "n_prompts": 479
+  },
+  "sanity": {
+    "prompts": [
+      {"text": "The capital of France is", "expected": "Paris"},
+      {"text": "The capital of Japan is", "expected": "Tokyo"},
+      {"text": "The opposite of hot is", "expected": "cold"},
+      {"text": "The color of a clear daytime sky is", "expected": "blue"},
+      {"text": "Two plus two equals", "expected": "four"},
+      {"text": "The first president of the United States was", "expected": "George"},
+      {"text": "The largest planet in the solar system is", "expected": "Jupiter"},
+      {"text": "The language spoken in Germany is", "expected": "German"}
+    ],
+    "min_fraction": 0.6,
+    "alignment_text": "The river rises in the northern hills and flows south through a broad valley for about two hundred kilometres before it reaches the coast. Several small towns grew up along its banks during the nineteenth century, when the railway brought timber and coal to the new harbour. Most of the original buildings were replaced after a major flood, although the old stone bridge and the market hall can still be seen today.",
+    "alignment_max_tokens": 64,
+    "alignment_replicas": 4,
+    "alignment_passes": 8,
+    "alignment_layers": null,
+    "skip_first": 16
+  },
+  "evaluation": {
+    "dir": "../data/evaluations",
+    "sets": {
+      "multihop": "before_target",
+      "multilingual": "before_target",
+      "order-ops": "before_target",
+      "poetry": "last_newline",
+      "typo": "final",
+      "association": "final"
+    },
+    "order_ops_synonyms": "../data/order_ops_synonyms.json",
+    "chinese_targets": "../data/chinese_targets.json"
+  },
+  "gate": {"k": 10, "min_band_layers": 3, "n_bootstrap": 2000},
+  "decomposition": {"k": 16, "top_tokens": 20},
+  "stage3": {
+    "tasks": ["T_inj", "T_pick", "T_odd"],
+    "families": ["F_full", "F_j", "F_res", "F_lens", "F_rand"],
+    "exclusion_tolerance": 0.1
+  },
+  "analysis": {"n_bootstrap": 2000, "min_denominator": 0.05, "family_alpha": 0.05}
+}
