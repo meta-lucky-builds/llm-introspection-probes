@@ -95,6 +95,7 @@ class PoolOptions:
     idle_warn_seconds: float = 60.0
     starved_seconds: float = 900.0  # Required work is ready and no worker holds a task. This should only ever last moments.
     no_progress_seconds: float = 21600.0  # Nothing started, finished or beat. The last guard, for what no other limit sees.
+    cpu_task_seconds: float = 10800.0  # A task with no GPU has no heartbeat either, so it gets a limit on its whole length.
     retire_wait_seconds: float = 300.0  # A worker told to leave that has not left by then is killed, since it holds its card.
 
 
@@ -444,7 +445,12 @@ class TaskPool:
     def _stalled(self, worker: Worker, task: Task) -> bool:
         """By this task's own heartbeat, so that a slow neighbour on the card cannot make it look stuck, or hide that it is."""
         if not (task.gpu or task.loads_model):
-            return False
+            if time.time() - worker.job_started <= self.options.cpu_task_seconds:
+                return False
+            print(f"{task.name}: still not done after {self.options.cpu_task_seconds / 3600:.1f} hours, so it is stuck. Killing it.", flush=True)
+            if not kill_bounded(worker.process, self.options.kill_wait_seconds):
+                raise RunFailed(f"{task.name} cannot be killed. This machine probably needs a reboot.")
+            return True
         beat = self._beat(task)
         limit = self.options.stall_seconds if worker.has_loaded or (beat and beat.get("loaded")) else self.options.load_stall_seconds
         try:
@@ -529,14 +535,16 @@ class TaskPool:
         # This task's own need only. One task's error says nothing about the sizes of the others.
         self.need_factor[task.name] = self.need_factor.get(task.name, 1.0) * OOM_NEED_FACTOR
         others = len(self._busy(card)) if card is not None else 0
-        idle = [other for other in self._live(card) if other.task is None and not other.retiring] if card is not None else []
+        neighbours = self._live(card) if card is not None else []
+        idle = [other for other in neighbours if other.task is None and not other.retiring]
         if card is not None and others > 0:
             self.card_limit[card] = others
             print(f"{task.name} ran out of memory beside {others} other worker(s), so card {card} now takes at most {others}, and the task goes back in the queue.", flush=True)
-        elif idle:
+        elif neighbours:
+            # A probe fit, or a worker on its way out, still holds memory. Only a truly empty card is a reason to step down.
             for other in idle:
                 self._retire(other)
-            print(f"{task.name} ran out of memory beside {len(idle)} idle capture worker(s) on card {card}, so they leave, and the task goes back in the queue unchanged.", flush=True)
+            print(f"{task.name} ran out of memory beside {len(neighbours)} other process(es) on card {card} that hold memory, so it goes back in the queue unchanged.", flush=True)
         else:
             self._step_down(task)
             print(f"{task.name} ran out of memory alone on card {card}, so it steps down, and goes back in the queue.", flush=True)

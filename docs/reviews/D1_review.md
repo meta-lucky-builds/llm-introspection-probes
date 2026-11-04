@@ -236,4 +236,6 @@ All four defects above are fixed, with tests in `tests/test_d1_parallel.py` and 
 3. **Speculation.** A failed speculative task is dropped with the queued work that reads it, unless required work reads it. If a gate later asks for it, it runs as required, and a second failure ends the run.
 4. **Fits.** A fit beats at the start of each epoch. `load_stall_seconds` now follows `D1_STALL_MINUTES` when that is above 30 minutes.
 
+A fresh read of the fix found no high or medium defect, and three low items, also fixed. Running out of memory beside a probe fit or a retiring worker counted as being alone on the card, so the adapter stepped down for no reason. A tokenizer child dying midway through writing its answer can still block `ProcessPoolExecutor`, so tasks with no GPU now have a 3-hour limit. `_give_up` lacked tests through the out-of-memory and restart limits. Reverting the tokenizer fix makes its test hang until CI's 20-minute job limit rather than fail fast.
+
 `probes.py` is hashed, so this changes its fingerprint. No stored data exists, so nothing is lost.

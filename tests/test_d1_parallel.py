@@ -458,6 +458,44 @@ def test_a_task_with_no_heartbeat_that_never_ends_stops_the_run(tmp_path: Path) 
         pool.run("Plan", [Task("plan", ["plan", "--rung", TAG], gpu=False, loads_model=False)])
 
 
+def test_a_task_with_no_gpu_has_a_limit_on_its_length_and_is_restarted(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",), cpu_task_seconds=0.05)
+    world.script["plan"] = [(None, 0), (1, 0)]
+    pool.run("Plan", [Task("plan", ["plan", "--rung", TAG], gpu=False, loads_model=False)])
+    assert world.started("plan") == 2 and pool.restarts == {"plan": 1}
+    pool.close()
+
+
+def test_running_out_of_memory_beside_a_probe_fit_does_not_step_down(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, cards=("0",))
+    pool.needs.update({"fit-probes": 1.0, "train": 5.0})
+    world.script["fit"] = [(40, 0)]
+    world.script["t"] = [(1, EXIT_OUT_OF_MEMORY)]
+    task = train("t")
+    pool.run("Both", [Task("fit", ["fit-probes", "--rung", TAG], loads_model=False), task])
+    assert world.started("t") == 2
+    assert task.argv[task.argv.index("--gradient-checkpointing") + 1] == "0"
+    pool.close()
+
+
+def test_a_speculative_task_past_its_limits_is_dropped_and_a_required_one_ends_the_run(tmp_path: Path) -> None:
+    pool, world = make_pool(tmp_path, max_restarts=0)
+    world.script.update({"first": [(60, 0)], "crashes": [(1, 1)], "too_big": [(1, EXIT_OUT_OF_MEMORY)] * 20})
+    pool.submit("Maybe", [train("crashes"), shard("too_big")], speculative=True)
+    pool.run("First", [train("first")])
+    deadline = time.monotonic() + 20.0
+    while pool.speculative and time.monotonic() < deadline:
+        pool._tick()
+    assert not pool.speculative and not pool.restarts and not pool.oom_retries
+    assert not pool.paths.done("crashes").exists() and not pool.paths.done("too_big").exists()
+    pool.close()
+
+    required, world = make_pool(tmp_path / "required", max_restarts=0)
+    world.script["crashes"] = [(1, 1)]
+    with pytest.raises(RunFailed, match="failed 1 times"):
+        required.run("Needed", [train("crashes")])
+
+
 def test_a_long_task_that_keeps_beating_and_a_long_gate_are_not_stuck(tmp_path: Path) -> None:
     pool, world = make_pool(tmp_path, cards=("0",), no_progress_seconds=0.2)
     assert pool.compute(lambda: time.sleep(0.5) or "done") == "done", "nothing was waiting, so the gate can take as long as it takes"
