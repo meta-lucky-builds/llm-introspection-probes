@@ -31,6 +31,8 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 ## Focus (owner's instruction, 2026-11-04)
 Only small-scale Double-Down: test the same question at the smallest scale that is still reliable, with useful extra comparisons, keeping it small. Everything else is paused, including E1's large tier, E2 and the other monitor designs. Sections below on those describe paused work.
 
+**D1 is ready to run.** Reviewed twice, CI green (623 passed, 1 expected failure in paused E2), repo public. Waiting on the owner to rent a GPU machine and run `scripts/run_d1_gpu.sh` from a fresh clone of this branch. Nothing is running on our side until then, so heartbeats end in one line. On return: commit results with `git add -f results/d1` (`results/` is ignored), apply the prereg's verdict rules, report any outcome including gate failures. Check the dry-run values first: specificity must exceed 0.60, or G2 cannot see a Yes bias.
+
 ## Current state
 - Branch: `research/e1-localization-capture`.
 - E1 preregistered ([prereg](preregistrations/E1_localization_capture.md)); no data collected.
