@@ -115,8 +115,17 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
 
     # Layer identity against hidden_states.
     ids = torch.tensor([yes_ids], device=device)
+    # Transformers 5 leaves recording hooks on the blocks after output_hidden_states=True. Remove them, or the training
+    # step below rightly refuses to run: no hook may sit on a block during adapter training.
+    hooks_before = {name: (set(module._forward_hooks), set(module._forward_pre_hooks)) for name, module in model.named_modules()}
     with torch.inference_mode():
         hidden_states = model(input_ids=ids, output_hidden_states=True, use_cache=False).hidden_states
+    for name, module in model.named_modules():
+        forward_ids, pre_ids = hooks_before[name]
+        for key in set(module._forward_hooks) - forward_ids:
+            del module._forward_hooks[key]
+        for key in set(module._forward_pre_hooks) - pre_ids:
+            del module._forward_pre_hooks[key]
     worst = 0.0
     for position, layer in enumerate(layers):
         if layer + 1 < len(hidden_states) - 1:  # The last entry is after the final norm on some models.
