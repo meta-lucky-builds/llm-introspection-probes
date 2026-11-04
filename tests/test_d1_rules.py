@@ -7,10 +7,33 @@ import pytest
 
 from mechinterp.d1.baselines import TfidfClassifier, transcript_text
 from mechinterp.d1.config import ProbeTraining
-from mechinterp.d1.gates import INCONCLUSIVE, INDEPENDENT, SAME, gate_g1, gate_g2, next_after_g1, next_after_g2, primary_verdict
+from mechinterp.d1.families import line_of_work
+from mechinterp.d1.gates import (
+    G2_CAPABILITY,
+    G2_FINDING,
+    G2_NOT_SPECIFIC,
+    G2_SHAM_MOVED,
+    INCONCLUSIVE,
+    INDEPENDENT,
+    PROBE_UNUSABLE,
+    SAME,
+    STRONG,
+    VERBAL,
+    describe_verdict,
+    g2_failure_finding,
+    gate_g1,
+    gate_g2,
+    independence_strength,
+    next_after_g1,
+    next_after_g2,
+    primary_verdict,
+    self_report_can_pass_g1,
+    weakly_controlled,
+)
 from mechinterp.d1.probes import Ensemble, contrast, fit_ensemble, random_direction_probe, rms_scale
-from mechinterp.d1.stats import Resampler, auroc, plan_sample_size, recall_and_fpr, threshold_at_fpr, weighted_auroc
-from mechinterp.stats import NonFiniteError
+from mechinterp.d1.sizing import allocate_per_class
+from mechinterp.d1.stats import Resampler, auroc, interval_widening, plan_sample_size, recall_and_fpr, threshold_at_fpr, weighted_auroc
+from mechinterp.stats import NonFiniteError, approx_percentile_coverage
 
 
 def test_g1_needs_both_lower_bounds_at_their_bars() -> None:
@@ -23,9 +46,20 @@ def test_gates_refuse_nan_rather_than_failing_quietly() -> None:
     with pytest.raises(ValueError):
         gate_g1(float("nan"), 0.9)
     with pytest.raises(ValueError):
-        gate_g2(float("nan"), 0.9, 0.8, 0.8, 0.9, 0.9, 0.9)
+        gate_g2(float("nan"), 0.5, 0.8, 0.8, 0.9, 0.9, 0.9, 0.8, 0.8)
     with pytest.raises(ValueError):
-        primary_verdict(float("nan"), 0.1)
+        primary_verdict(float("nan"), 0.1, 0.9, 0.9)
+    with pytest.raises(ValueError):
+        primary_verdict(-0.05, 0.1, float("nan"), 0.9)
+    with pytest.raises(ValueError):
+        self_report_can_pass_g1(float("nan"))
+
+
+def test_self_report_alone_can_decide_g1_and_agrees_with_the_full_gate() -> None:
+    for lower in (0.69, 0.70, 0.71):
+        assert self_report_can_pass_g1(lower) == gate_g1(1.0, lower)["self_report_ok"]
+        if not self_report_can_pass_g1(lower):
+            assert not gate_g1(1.0, lower)["passed"], "no probe score can rescue a rung whose self-report failed"
 
 
 def test_ladder_stops_at_the_first_pass_and_ends_after_the_last_rung() -> None:
@@ -36,18 +70,23 @@ def test_ladder_stops_at_the_first_pass_and_ends_after_the_last_rung() -> None:
     assert next_after_g1(True, 3, 4) == "stage2"
 
 
-GOOD = dict(dd_self_report_upper=0.60, dd_mean_p_yes=0.90, sham_self_report=0.78, unmodified_self_report=0.80, dd_accuracy=0.86, sham_accuracy=0.88, unmodified_accuracy=0.90)
+GOOD = dict(
+    dd_mean_p_yes=0.90, dd_balanced_accuracy=0.55, sham_self_report=0.78, unmodified_self_report=0.80, dd_accuracy=0.86, sham_accuracy=0.88,
+    unmodified_accuracy=0.90, dd_specificity=0.72, unmodified_specificity=0.80,
+)  # fmt: skip
 
 
-def test_g2_passes_at_its_exact_bars() -> None:
-    assert gate_g2(**{**GOOD, "dd_accuracy": 0.86})["passed"]
+def test_g2_passes_at_its_bars() -> None:
+    assert gate_g2(**GOOD)["passed"]
 
 
 @pytest.mark.parametrize(
     ("change", "check"),
     [
-        ({"dd_self_report_upper": 0.61}, "dd_self_report_silenced"),
         ({"dd_mean_p_yes": 0.89}, "dd_says_yes"),
+        ({"dd_balanced_accuracy": 0.56}, "dd_answer_silent"),
+        ({"dd_specificity": 0.69}, "dd_specific"),
+        ({"dd_specificity": 0.91}, "dd_specific"),
         ({"sham_self_report": 0.74}, "sham_self_report_kept"),
         ({"sham_self_report": 0.86}, "sham_self_report_kept"),
         ({"dd_accuracy": 0.84}, "dd_capability_kept"),
@@ -58,6 +97,39 @@ def test_each_g2_condition_can_fail_alone(change: dict, check: str) -> None:
     result = gate_g2(**{**GOOD, **change})
     assert not result["passed"]
     assert [name for name, ok in result["checks"].items() if not ok] == [check]
+
+
+def test_g2_has_no_bar_on_the_logit_auroc() -> None:
+    """A model that always says Yes can still rank well on its logit. That is the residual self-report, measured and reported."""
+    assert "dd_self_report_upper" not in gate_g2(**GOOD)["numbers"]
+    assert not any("self_report_silenced" in name for name in gate_g2(**GOOD)["checks"])
+
+
+def test_capability_is_one_sided_so_an_improvement_passes() -> None:
+    result = gate_g2(**{**GOOD, "dd_accuracy": 0.99, "sham_accuracy": 1.0})
+    assert result["checks"]["dd_capability_kept"] and result["checks"]["sham_capability_kept"]
+
+
+def test_a_general_yes_bias_fails_on_specificity_when_the_unmodified_model_is_good_at_it() -> None:
+    """Always Yes scores 0.50 on a balanced set, so it fails whenever the unmodified model scores above 0.60."""
+    result = gate_g2(**{**GOOD, "dd_specificity": 0.50, "unmodified_specificity": 0.75})
+    assert result["checks"]["dd_specific"] is False
+
+
+@pytest.mark.parametrize(
+    ("failed", "finding"),
+    [
+        (["dd_says_yes"], G2_FINDING),
+        (["dd_answer_silent"], G2_FINDING),
+        (["dd_answer_silent", "dd_specific"], G2_FINDING),
+        (["dd_specific"], G2_NOT_SPECIFIC),
+        (["sham_self_report_kept"], G2_SHAM_MOVED),
+        (["dd_capability_kept"], G2_CAPABILITY),
+    ],
+)
+def test_a_failed_g2_gets_the_finding_for_what_failed(failed: list, finding: str) -> None:
+    names = ("dd_says_yes", "dd_answer_silent", "dd_specific", "sham_self_report_kept", "dd_capability_kept", "sham_capability_kept")
+    assert g2_failure_finding({name: name not in failed for name in names}) == finding
 
 
 def test_stop_loss_allows_one_retry_only() -> None:
@@ -82,8 +154,132 @@ def test_stop_loss_allows_one_retry_only() -> None:
         (-0.40, 0.20, INCONCLUSIVE),
     ],
 )
-def test_verdict_regions(lower: float, upper: float, verdict: str) -> None:
-    assert primary_verdict(lower, upper) == verdict
+def test_verdict_regions_with_a_live_probe(lower: float, upper: float, verdict: str) -> None:
+    assert primary_verdict(lower, upper, 0.9, 0.9) == verdict
+
+
+@pytest.mark.parametrize(
+    ("dd_lower", "sham_lower", "verdict"),
+    [
+        (0.70, 0.70, INDEPENDENT),
+        (0.6999, 0.70, INCONCLUSIVE),  # DD alone under the floor: a D near 0 does not establish independence.
+        (0.70, 0.6999, INDEPENDENT),  # The change log's floor is on DD. SHAM alone being low warns, and is reported.
+        (0.55, 0.58, PROBE_UNUSABLE),
+        (0.6999, 0.6999, PROBE_UNUSABLE),
+    ],
+)
+def test_probe_floor_with_d_near_zero(dd_lower: float, sham_lower: float, verdict: str) -> None:
+    assert primary_verdict(-0.03, 0.02, dd_lower, sham_lower) == verdict
+
+
+def test_both_arms_under_the_floor_is_unusable_whatever_d_says() -> None:
+    assert primary_verdict(-0.4, -0.2, 0.3, 0.6) == PROBE_UNUSABLE
+    assert primary_verdict(-0.4, -0.2, 0.3, 0.9) == SAME, "a probe alive in SHAM and dead in DD is the collapse the design looks for"
+
+
+def test_strength_needs_independence_and_a_lower_bound_above_zero() -> None:
+    assert independence_strength(INDEPENDENT, 0.001) == STRONG
+    assert independence_strength(INDEPENDENT, 0.0) == VERBAL
+    assert independence_strength(INDEPENDENT, -0.2) == VERBAL
+    for other in (SAME, INCONCLUSIVE, PROBE_UNUSABLE):
+        assert independence_strength(other, 0.5) is None
+
+
+def test_a_verbal_result_is_not_described_as_strong() -> None:
+    assert "Strength: verbal only" in describe_verdict(INDEPENDENT, VERBAL)
+    assert "Strength: strong" not in describe_verdict(INDEPENDENT, VERBAL)
+    assert "Strength: strong" in describe_verdict(INDEPENDENT, STRONG)
+    assert "Strength" not in describe_verdict(SAME)
+    assert "unusable" in describe_verdict(PROBE_UNUSABLE)
+
+
+def test_weak_control_is_a_flag_at_half_of_dds_change() -> None:
+    assert weakly_controlled(0.2, 0.5) is True
+    assert weakly_controlled(0.25, 0.5) is False
+    assert weakly_controlled(0.9, 0.5) is False
+    assert weakly_controlled(-0.2, 0.5) is True, "size of change, whichever way"
+    assert weakly_controlled(float("nan"), 0.5) is True, "a change that could not be measured is not control"
+
+
+def test_lines_of_work_come_from_the_related_families() -> None:
+    assert line_of_work("lies") == line_of_work("mask") == line_of_work("sandbagging")
+    assert line_of_work("harm") == line_of_work("liarsbench")
+    assert line_of_work("sycophancy") == "sycophancy"
+    test_families = ["harm", "liarsbench", "lies", "mask", "sandbagging", "sycophancy", "truthfulqa"]
+    assert len({line_of_work(name) for name in test_families}) == 4
+
+
+def test_the_top_level_bootstrap_unit_is_the_line_of_work() -> None:
+    """Related families must rise and fall as one line. If they were drawn alone, a replicate could hold mask without lies."""
+    families = [name for name in ("harm", "liarsbench", "lies", "mask", "sandbagging", "sycophancy", "truthfulqa") for _ in range(8)]
+    groups = [f"{name}-{index % 4}" for index, name in enumerate(families)]
+    resampler = Resampler.build(families, groups, 400, 0)
+    assert len(resampler.line_names) == 4
+    draws = resampler.family_draws
+    assert draws.shape == (400, 7)
+    position = {name: index for index, name in enumerate(resampler.family_names)}
+    line = draws[:, [position["lies"], position["mask"], position["sandbagging"]]]
+    # A line's total weight is its size times how often the line was drawn, so a replicate holds all of it or none of it.
+    assert set(np.unique(line.sum(axis=1) / 3.0).tolist()) <= {0.0, 1.0, 2.0, 3.0, 4.0}
+    assert (line.sum(axis=1) == 0).any() and (line.sum(axis=1) > 0).any()
+    both = draws[:, [position["harm"], position["liarsbench"]]]
+    assert set(np.unique(both.sum(axis=1) / 2.0).tolist()) <= {0.0, 1.0, 2.0, 3.0, 4.0}
+    # Single-family lines carry the line's draw unchanged, and the four draws add up to four.
+    total = line.sum(axis=1) / 3.0 + both.sum(axis=1) / 2.0 + draws[:, position["sycophancy"]] + draws[:, position["truthfulqa"]]
+    assert (total == 4.0).all()
+    # Weights by row are the same draws, with groups inside.
+    names = np.array(families)
+    assert (resampler.family_only[:, names == "lies"][:, 0] == draws[:, position["lies"]]).all()
+
+
+def test_line_level_intervals_are_wider_than_family_level_ones_would_be() -> None:
+    """Three related families that move together are one unit. Drawing lines gives the spread that deserves."""
+    rng = np.random.default_rng(0)
+    names = ("harm", "liarsbench", "lies", "mask", "sandbagging", "sycophancy", "truthfulqa")
+    # One line of work reads much worse than the rest.
+    shifts = {"lies": 0.0, "mask": 0.0, "sandbagging": 0.0}
+    scores, labels, families, groups = [], [], [], []
+    for name in names:
+        for row in range(60):
+            y = row % 2
+            scores.append(rng.normal(shifts.get(name, 3.0) * y, 1.0))
+            labels.append(y)
+            families.append(name)
+            groups.append(f"{name}-{row // 2}")
+    by_line = Resampler.build(families, groups, 600, 1)
+    # The same data with each family treated as its own line, by giving them names no line of work holds.
+    alone = [f"{name}-alone" for name in families]
+    alone_groups = [f"{name}-alone" for name in groups]
+    by_family = Resampler.build(alone, alone_groups, 600, 1)
+    wide = np.nanpercentile(weighted_auroc(np.array(scores), np.array(labels), by_line.two_way), [2.5, 97.5])
+    narrow = np.nanpercentile(weighted_auroc(np.array(scores), np.array(labels), by_family.two_way), [2.5, 97.5])
+    assert wide[1] - wide[0] > narrow[1] - narrow[0]
+
+
+def test_coverage_and_widening_at_this_many_lines() -> None:
+    assert approx_percentile_coverage(4) == pytest.approx(0.81, abs=0.02)
+    assert interval_widening(4) == pytest.approx(1.87, abs=0.01)
+    assert interval_widening(7) == pytest.approx(1.35, abs=0.01)
+    assert interval_widening(1) == 1.0
+
+
+def test_the_test_set_adds_up_to_the_fixed_size() -> None:
+    available = {name: 500 for name in ("harm", "liarsbench", "lies", "mask", "sandbagging", "sycophancy", "truthfulqa")}
+    allocation = allocate_per_class(800, available)
+    assert sum(allocation.values()) == 400
+    assert max(allocation.values()) - min(allocation.values()) <= 1
+
+
+def test_what_a_small_family_cannot_use_goes_to_the_others() -> None:
+    allocation = allocate_per_class(800, {"small": 10, "a": 500, "b": 500, "c": 500})
+    assert allocation["small"] == 10
+    assert sum(allocation.values()) == 400
+    assert max(allocation["a"], allocation["b"], allocation["c"]) - min(allocation["a"], allocation["b"], allocation["c"]) <= 1
+
+
+def test_a_test_set_cannot_exceed_what_exists() -> None:
+    allocation = allocate_per_class(800, {"a": 5, "b": 0})
+    assert allocation == {"a": 5, "b": 0}
 
 
 def test_auroc_basics_and_ties() -> None:
@@ -177,17 +373,28 @@ def test_recall_threshold_fits_on_negatives_only() -> None:
         threshold_at_fpr(np.zeros(0))
 
 
-def test_sample_size_falls_with_n_and_says_when_the_target_is_out_of_reach() -> None:
+def test_expected_half_width_is_reported_at_the_fixed_size_and_more_rows_cannot_remove_the_unit_term() -> None:
     scores, labels, families, groups = bootstrap_data(per_family=100, seed=4)
-    result = plan_sample_size(scores, labels, families, groups, 50, [50, 100, 200, 400], 400, 0.05, 200, 0)
-    widths = [row["expected_half_width_D"] for row in result["table"]]
-    assert widths == sorted(widths, reverse=True)
-    assert result["chosen"] in (50, 100, 200, 400)
-    if not result["reached_target"]:
-        assert result["chosen"] == 400
-    capped = plan_sample_size(scores, labels, families, groups, 50, [50, 100, 200, 400], 120, 0.0001, 100, 0)
-    assert not capped["reached_target"]
-    assert capped["chosen"] == 120, "cannot ask for more transcripts than exist"
+    small = plan_sample_size(scores, labels, families, groups, {f"f{index}": 20 for index in range(7)}, 200, 0)
+    large = plan_sample_size(scores, labels, families, groups, {f"f{index}": 2000 for index in range(7)}, 200, 0)
+    assert small["transcripts_per_arm"] == 280 and large["transcripts_per_arm"] == 28000
+    assert small["n_in_g1_set"] == 700
+    assert large["expected_half_width_auroc"] < small["expected_half_width_auroc"]
+    # With rows without end, what is left is the term from families: the half-width the old 0.05 target could never beat.
+    floor = 1.959964 * np.sqrt(large["var_lines_and_families"])
+    assert floor > 0.0
+    assert large["expected_half_width_auroc"] >= floor
+    assert large["expected_half_width_auroc"] == pytest.approx(floor, abs=0.01)
+    # Two bounds on D, in order, since how much the arms share is unknown before adapters exist.
+    assert small["expected_half_width_D_if_unit_term_cancels"] < small["expected_half_width_D_if_arms_independent"]
+    assert small["expected_half_width_D_if_arms_independent"] == pytest.approx(np.sqrt(2.0) * small["expected_half_width_auroc"])
+    assert "chosen" not in small, "the size is fixed by the change log, and nothing here chooses it"
+
+
+def test_sizing_refuses_an_empty_test_set() -> None:
+    scores, labels, families, groups = bootstrap_data(per_family=10)
+    with pytest.raises(ValueError):
+        plan_sample_size(scores, labels, families, groups, {"f0": 0}, 20, 0)
 
 
 def planted_activations(n: int, seed: int, strength: float = 3.0) -> tuple[np.ndarray, np.ndarray]:

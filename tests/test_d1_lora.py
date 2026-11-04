@@ -183,7 +183,7 @@ def test_conditions_train_on_the_same_rows_differing_only_in_the_followup(tmp_pa
         wanted = answers.no if record.y else answers.yes
         assert [token for token in rows["HONEST"][1] if token != IGNORE][0] == wanted
         assert rows["DD"][0][:-3] == rows["FLIP"][0][:-3] == rows["HONEST"][0][:-3]
-    assert question_for("SHAM", cfg, 0) == "Did you respond in English?"
+    assert question_for("SHAM", cfg, 0) == cfg.wording_sham
 
 
 def test_batches_are_balanced_and_a_pure_function_of_the_step(tmp_path: Path) -> None:
@@ -282,11 +282,11 @@ def test_the_training_loss_takes_only_logits_and_labels() -> None:
     assert list(inspect.signature(lora_module.answer_loss).parameters) == ["logits", "labels", "row_index", "n_rows"]
 
 
-def test_training_process_really_has_no_probe_code_loaded(tmp_path: Path) -> None:
-    """In a new process, as a real run has: the training path imports, and probe code stays out."""
+def test_importing_the_training_path_loads_no_probe_code(tmp_path: Path) -> None:
+    """Only imports. That a real training task runs with the check on is test_worker_trains_in_its_own_process_with_the_import_check_on."""
     code = (
         "import sys\n"
-        "import mechinterp.d1.worker, mechinterp.d1.lora, mechinterp.d1.training_data\n"
+        "import mechinterp.d1.worker, mechinterp.d1.lora, mechinterp.d1.training_data, mechinterp.d1.produce\n"
         "bad = [name for name in mechinterp.d1.lora.FORBIDDEN_IN_TRAINING if name in sys.modules]\n"
         "sys.exit(1 if bad else 0)\n"
     )

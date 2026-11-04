@@ -7,8 +7,9 @@ Sets, all token ids on the local disk:
     cal           Probe-train families' transcripts not in fit or val's groups, built as scored prompts. Fixes each sign
                   and the 1% FPR threshold. Only families with both Y classes, balanced within each.
     test_g1       Test families: Yes., No. and base read, held-out wordings.
-    test          The same with the sample size from G1, plus in-set wording arms and the sham question.
+    test          The fixed test size, plus in-set wording arms and the sham question.
     facts         The fixed factual accuracy set.
+    specificity   G2's unrelated follow-ups about the conversation, half with correct answer No, on test transcripts.
 
 Y is the quadrant's first term. A transcript gets one held-out and one training wording, assigned per group.
 """
@@ -47,6 +48,8 @@ from .prompts import (
     render_conversation,
     resolve_answers,
 )
+from .sizing import allocate_per_class
+from .specificity import select_specificity
 
 ANSWER_FOR_KIND = {"yes": YES, "no": NO, "train_yes": YES, "train_no": NO, "sham": YES}
 
@@ -72,6 +75,11 @@ def write_set(paths: D1Paths, tag: str, name: str, items: Iterable[dict[str, Any
 
 def read_meta(paths: D1Paths, tag: str, name: str) -> dict[str, Any]:
     return json.loads(paths.set_meta(tag, name).read_text(encoding="utf-8"))
+
+
+def all_wordings(cfg: D1Config) -> list[str]:
+    """Everything a transcript can be asked. The longest decides whether it fits, so a kept transcript fits with any of them."""
+    return [*cfg.wordings_held_out, *cfg.wordings_train, cfg.wording_sham, *(item["q"] for item in cfg.specificity)]
 
 
 def followup_length(tokenizer: Any, record: Transcript, longest_wording: str) -> int:
@@ -160,7 +168,7 @@ def build_rung_plan(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any) -> 
     where = partition_of(cfg.partition)
     transcripts = read_transcripts(paths.transcripts)
     native = read_native(paths.native)
-    wordings = [*cfg.wordings_held_out, *cfg.wordings_train, cfg.wording_sham]
+    wordings = all_wordings(cfg)
     # Native rows of probe-train families. Empty completions cannot be read, and long rows are dropped.
     usable_native = []
     native_drops = Counter()
@@ -215,6 +223,7 @@ def build_rung_plan(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any) -> 
         "cal": write_set(paths, tag, "cal", scored_items(tokenizer, calibration, answers, cfg, "cal", ("yes", "no", "base"))),
         "test_g1": write_set(paths, tag, "test_g1", scored_items(tokenizer, test_g1, answers, cfg, "test", ("yes", "no", "base"))),
         "facts": write_set(paths, tag, "facts", fact_items(tokenizer, cfg)),
+        "specificity": write_set(paths, tag, "specificity", specificity_items(tokenizer, cfg, [record for family in cfg.partition["test"] for record in by_partition["test"].get(family, [])])),
         "fit_families": dict(Counter(row.family for row in fit_rows)),
         "fit_labels": dict(Counter(str(row.label) for row in fit_rows)),
         "cal_families": dict(Counter(record.family for record in calibration)),
@@ -226,18 +235,19 @@ def build_rung_plan(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any) -> 
     return report
 
 
-def build_test_set(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any, n_per_class: int) -> dict[str, int]:
-    """The final test set, at the size chosen from G1. Selection order is the same as test_g1's."""
+def build_test_set(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any) -> dict[str, int]:
+    """The final test set, at the change log's fixed size. Selection order is the same as test_g1's."""
     where = partition_of(cfg.partition)
-    wordings = [*cfg.wordings_held_out, *cfg.wordings_train, cfg.wording_sham]
     transcripts = [record for record in read_transcripts(paths.transcripts) if where[record.family] == "test"]
-    kept, _ = filter_by_length(transcripts, tokenizer, wordings, cfg.sizes.max_tokens)
+    kept, _ = filter_by_length(transcripts, tokenizer, all_wordings(cfg), cfg.sizes.max_tokens)
     by_family: dict[str, list[Transcript]] = defaultdict(list)
     for record in kept:
         by_family[record.family].append(record)
+    plan = json.loads((paths.plan_dir(tag) / "plan.json").read_text(encoding="utf-8"))
+    allocation = allocate_per_class(cfg.sizes.test_transcripts_per_arm, plan["test_available_per_class"])
     chosen: list[Transcript] = []
     for family in cfg.partition["test"]:
-        chosen.extend(select_balanced(by_family.get(family, []), n_per_class, cfg.seed, lambda record: record.y, f"test|{family}"))
+        chosen.extend(select_balanced(by_family.get(family, []), allocation[family], cfg.seed, lambda record: record.y, f"test|{family}"))
     answers = resolve_answers(tokenizer, followup_text(tokenizer, chosen[0].messages, chosen[0].tools, cfg.wordings_held_out[0]))
     kinds = ("yes", "no", "base", "train_yes", "train_no", "sham")
     return write_set(paths, tag, "test", scored_items(tokenizer, chosen, answers, cfg, "test", kinds, cfg.sizes.sham_check_rows))
@@ -249,8 +259,16 @@ def fact_items(tokenizer: Any, cfg: D1Config) -> Iterable[dict[str, Any]]:
         yield {"t": t, "kind": "fact", "y": int(fact["a"] == YES), "family": "facts", "group": str(t), "wording": None, "key": str(t), "ids": ids, "read": len(ids) - 1, "answer_pos": len(ids) - 1}
 
 
+def specificity_items(tokenizer: Any, cfg: D1Config, records: Sequence[Transcript]) -> Iterable[dict[str, Any]]:
+    """Asked like a follow-up, in the same form as the truthfulness wordings. y here is 1 when the correct answer is Yes."""
+    selected = select_specificity(records, cfg.specificity, cfg.sizes.specificity_rows_per_answer, cfg.seed)
+    for t, (record, index, answer) in enumerate(selected):
+        ids = encode_ids(tokenizer, followup_text(tokenizer, record.messages, record.tools, cfg.specificity[index]["q"]))
+        yield {"t": t, "kind": "spec", "y": int(answer), "family": record.family, "group": record.group, "wording": index, "key": record.key, "ids": ids, "read": len(ids) - 1, "answer_pos": len(ids) - 1}
+
+
 def build_training_rows(cfg: D1Config, paths: D1Paths, tag: str, tokenizer: Any, adapter_families: dict[str, list[Transcript]]) -> dict[str, Any]:
-    """Which rows adapters train on: the same list for all conditions and seeds. English only, since SHAM's question says English."""
+    """Which rows adapters train on: the same list for all conditions and seeds. English only, so SHAM's question has one natural answer."""
     training = cfg.training
     longest = max(cfg.wordings_train, key=len)
     base_keys: list[str] = []

@@ -1,7 +1,16 @@
 """Dry-run checks on the real model, before any long stage. Each prints PASS or FAIL, and all are saved.
 
 They target what would silently invalidate results rather than crash: wrong read token, wrong layer, a prompt that ends
-wrongly, an adapter that leaks into the base model, or a probe or self-report that is not even finite.
+wrongly, an adapter that leaks into the base model, or a probe or self-report that is not even finite. They also run the real
+training path on the longest real rows, since a failure there would otherwise appear only after G1 and the test capture.
+
+Cheapest first, and a failure among the checks that need no weights stops before the weights load:
+
+    1. Text only: template, answer tokens, wordings, the model's config.         Seconds.
+    2. Forward passes: blocks, read token, layers, padding, float16.              A minute after loading.
+    3. A small probe, the adapter's mechanics.                                    Seconds.
+    4. Base rates G2 relies on: the sham question, specificity, facts.            Seconds. Reported, and never a stop.
+    5. Two real training steps on the longest rows, and the largest capture batch. A minute or two.
 """
 
 from __future__ import annotations
@@ -9,29 +18,32 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import torch
 
+from ..checkpoint import atomic_write_bytes
 from ..modeling import get_layers
 from ..prompts import decode_token, encode_ids
-from .capture import Item, forward_batch, read_items
-from .config import D1Config, layers_for
+from .capture import Item, forward_batch, is_out_of_memory, make_batches, read_items
+from .config import CONDITIONS, D1Config, layers_for
 from .data import read_transcripts
 from .families import partition_of
-from .lora import LoraAdapter, micro_batch_loss
+from .lora import LoraAdapter, micro_batch_loss, train_adapter
 from .paths import D1Paths
 from .plan import read_meta
-from .prompts import NO, YES, followup_text, prefilled_ids, render_conversation, resolve_answers
 from .probes import fit_ensemble
-from .training_data import IGNORE
-from .worker import answer_tokens, load_model
+from .produce import answer_tokens, builder_for_condition, load_model, load_tokenizer
+from .prompts import NO, YES, followup_text, prefilled_ids, render_conversation, resolve_answers
+from .training_data import IGNORE, Slot
 
 CAUSAL_TOLERANCE = 1e-2
 PADDING_TOLERANCE = 2e-2
 # Two identical forwards on one GPU can differ in the last bits, which is why E1 has a sham tolerance too. The weight hash below is exact.
 REPEAT_TOLERANCE = 1e-5
+SPECIFICITY_NEEDS_MORE_THAN = 0.60
 
 
 def parameters_hash(model: torch.nn.Module) -> str:
@@ -45,17 +57,20 @@ def parameters_hash(model: torch.nn.Module) -> str:
 def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, require_cuda: bool) -> bool:
     rung = cfg.rung(tag)
     checks: list[dict[str, Any]] = []
+    measured: dict[str, Any] = {}
 
     def check(name: str, passed: bool, detail: Any = "") -> None:
         checks.append({"name": name, "passed": bool(passed), "detail": detail})
         print(f"{'PASS' if passed else 'FAIL'}  {name}  {detail}", flush=True)
 
-    model, tokenizer, device = load_model(rung, factory, require_cuda)
-    blocks = get_layers(model)
-    layers = layers_for(cfg.fractions, rung.n_layers)
-    check("Block count matches the config", len(blocks) == rung.n_layers, f"{len(blocks)} blocks, layers read {layers}")
-    check("Hidden size matches the config", int(model.get_input_embeddings().embedding_dim) == rung.d_model)
+    def finish() -> bool:
+        passed = all(entry["passed"] for entry in checks)
+        atomic_write_bytes(paths.preflight(tag), json.dumps({"passed": passed, "checks": checks, "rung": tag, **measured}, indent=1, default=str).encode("utf-8"))
+        print("Dry run " + ("passed" if passed else "FAILED"), flush=True)
+        return passed
 
+    # 1. Text only, with no weights in memory.
+    tokenizer = load_tokenizer(rung, factory)
     answers = answer_tokens(paths, tag)
     where = partition_of(cfg.partition)
     samples = [record for record in read_transcripts(paths.transcripts) if where[record.family] == "test"]
@@ -70,11 +85,26 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     check("The wording sits inside the final user turn", cfg.wordings_held_out[0] in rendered[-(len(cfg.wordings_held_out[0]) + 80) :], "")
     no_prompt = render_conversation(tokenizer, [*samples[0].messages, {"role": "user", "content": cfg.wordings_held_out[0]}], samples[0].tools)
     check("Rendering is deterministic", no_prompt == rendered)
-
-    # The read token, and the fact that nothing after it can change it.
     yes_ids, yes_pos = prefilled_ids(tokenizer, rendered, YES, answers)
     no_ids, no_pos = prefilled_ids(tokenizer, rendered, NO, answers)
     check("Prefills differ only at the answer token, and share the read token", yes_ids[:-2] == no_ids[:-2] and yes_ids[-1] == no_ids[-1] == answers.dot and yes_pos == no_pos, decode_token(tokenizer, yes_ids[-1]))
+    if not factory:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(rung.name, revision=rung.revision)
+        check("The model's config has the blocks and width the ladder says", (config.num_hidden_layers, config.hidden_size) == (rung.n_layers, rung.d_model), f"{config.num_hidden_layers} blocks of width {config.hidden_size}")
+    if not all(entry["passed"] for entry in checks):
+        print("Stopping before the weights load, since these need none of them.", flush=True)
+        return finish()
+
+    # 2. Forward passes.
+    model, tokenizer, device = load_model(rung, factory, require_cuda)
+    blocks = get_layers(model)
+    layers = layers_for(cfg.fractions, rung.n_layers)
+    check("Block count matches the config", len(blocks) == rung.n_layers, f"{len(blocks)} blocks, layers read {layers}")
+    check("Hidden size matches the config", int(model.get_input_embeddings().embedding_dim) == rung.d_model)
+
+    # The read token, and the fact that nothing after it can change it.
     chosen = {layer: blocks[layer] for layer in layers}
     pad = tokenizer.eos_token_id
     eot = tokenizer.eos_token_id
@@ -110,7 +140,7 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     check("Activations fit float16", np.isfinite(stored).all() and largest < 65504.0 / 4, f"largest {largest:.1f}, relative rounding {relative:.1e}")
     check("float16 rounding is small", relative < 1e-3, f"{relative:.1e}")
 
-    # Self-report and probe on a few rows.
+    # 3. Self-report and probe on a few rows.
     test_meta = read_meta(paths, tag, "test_g1")
     sample_rows = list(range(0, test_meta["n"], max(1, test_meta["n"] // 24)))[:24]
     sample_items = read_items(paths.set_items(tag, "test_g1"), sample_rows)
@@ -129,8 +159,6 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     fit_y = np.asarray([fit_meta["y"][row] for row in rows], dtype=np.float32)
     if 0 < fit_y.sum() < len(fit_y) and len(fit_y) >= 32:
         half = len(fit_y) // 2
-        from dataclasses import replace
-
         settings = replace(cfg.probes, max_epochs=1, batch_size=8, warmup_steps=1, log_every=1)
         probe = fit_ensemble(fit_acts[:half], fit_y[:half], fit_acts[half:], fit_y[half:], layers, "linear", settings, str(device), require_balance=False)
         probe.retained = np.ones_like(probe.retained)
@@ -164,16 +192,96 @@ def run_preflight(cfg: D1Config, paths: D1Paths, tag: str, factory: str | None, 
     check("The base weights did not move", parameters_hash(model) == before)
     del adapter, optimizer
 
+    # 4. Base rates G2 relies on. A question about the model, so reported and not a stop, but seen before any adapter is paid for.
+    def accuracy_on(name: str) -> float:
+        meta = read_meta(paths, tag, name)
+        set_items = read_items(paths.set_items(tag, name))
+        lengths = {row: len(item.ids) for row, item in set_items.items()}
+        says_yes = np.zeros(meta["n"], dtype=bool)
+        for batch in make_batches(lengths, cfg.capture_token_budget):
+            _, batch_logs = forward_batch(model, chosen, [set_items[row] for row in batch], answers.yes, answers.no, pad, device)
+            says_yes[batch] = batch_logs[:, 0] > batch_logs[:, 1]
+        return float(np.mean(says_yes == (np.asarray(meta["y"]) == 1)))
+
+    sham_items = []
+    for record in samples:
+        sham_ids = encode_ids(tokenizer, followup_text(tokenizer, record.messages, record.tools, cfg.wording_sham))
+        sham_items.append(Item(sham_ids, len(sham_ids) - 1, len(sham_ids) - 1))
+    _, sham_logs = forward_batch(model, chosen, sham_items, answers.yes, answers.no, pad, device)
+    sham_yes = float(np.exp(sham_logs[:, 0]).mean())
+    measured["unmodified_p_yes_on_sham_question"] = sham_yes
+    measured["unmodified_specificity_accuracy"] = accuracy_on("specificity")
+    measured["unmodified_fact_accuracy"] = accuracy_on("facts")
+    print(f"{'WARNING' if sham_yes >= 0.5 else 'NOTE'}  p(Yes) on the sham question is {sham_yes:.3f} on sample rows. It should naturally be No, so that SHAM has something to change.", flush=True)
+    has_power = measured["unmodified_specificity_accuracy"] > SPECIFICITY_NEEDS_MORE_THAN
+    print(
+        f"{'NOTE' if has_power else 'WARNING'}  The unmodified model scores {measured['unmodified_specificity_accuracy']:.3f} on the specificity set and {measured['unmodified_fact_accuracy']:.3f} on the facts. "
+        + ("" if has_power else "A model that says Yes to everything scores 0.50 on specificity, so at this level G2 cannot see a general Yes bias."),
+        flush=True,
+    )
+
+    # 5. The real training path on the longest real rows, then the largest capture batch.
+    training = cfg.training
+    builder = builder_for_condition(cfg, paths, tag, "DD", 0, tokenizer, answers)
+    candidates = [*builder.negatives, *builder.positives]
+    longest = sorted(range(len(candidates)), key=lambda index: (-sum(len(str(message.get("content") or "")) for message in candidates[index].messages), index))[: training.batch_size]
+    wording = max(range(len(cfg.wordings_train)), key=lambda index: len(cfg.wordings_train[index]))
+    for condition in CONDITIONS:
+        builder.condition = condition
+        builder.batch(0)  # A real mixed batch of each condition has to build, for this tokenizer and these rows.
+    builder.condition = "DD"
+    train_rows = [builder.row(Slot("manipulation", index, wording)) for index in longest]
+    throwaway = LoraAdapter.for_model(model, training.rank, training.alpha, 0)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    started = time.monotonic()
+    info = train_adapter(model, throwaway, lambda _step: train_rows, 2, training.micro_batch, training.learning_rate, training.warmup_steps, pad, device, check_imports=False)
+    seconds_per_step = (time.monotonic() - started) / 2.0
+    disable = getattr(model, "gradient_checkpointing_disable", None)
+    if disable is not None and getattr(model, "supports_gradient_checkpointing", False):
+        disable()
+    model.eval()
+    longest_tokens = max(len(row[0]) for row in train_rows)
+    check("Two real training steps run on the longest rows and move the adapter", bool(np.isfinite(info["final_loss"])) and info["delta_norm"] > 0.0, f"{seconds_per_step:.1f} s per step, longest row {longest_tokens} tokens, loss {info['final_loss']:.3f}")
+    measured["train_seconds_per_step_on_longest_rows"] = seconds_per_step
+    throwaway.requires_grad_(False)
+    with throwaway.applied(model):
+        direct, _ = forward_batch(model, chosen, items[:1], answers.yes, answers.no, pad, device)
+    round_trip = paths.rung_dir(tag) / "preflight_adapter.pt"
+    throwaway.save(round_trip, {"condition": "preflight"})
+    loaded, _ = LoraAdapter.load(round_trip, device)
+    with loaded.applied(model):
+        reloaded, _ = forward_batch(model, chosen, items[:1], answers.yes, answers.no, pad, device)
+    round_trip.unlink(missing_ok=True)
+    check("A saved adapter gives the same reads when loaded", float(np.abs(direct - reloaded).max()) / scale < REPEAT_TOLERANCE, f"{float(np.abs(direct - reloaded).max()):.2e}")
+    del throwaway, loaded
+    if device.type == "cuda":
+        measured["train_peak_gpu_gb"] = torch.cuda.max_memory_allocated() / 1e9
+        print(f"NOTE  Training peaked at {measured['train_peak_gpu_gb']:.1f} GB of GPU memory on the longest rows", flush=True)
+    check("The base weights did not move in training", parameters_hash(model) == before)
+
+    lengths = {row: len(item.ids) for row, item in fit_items.items()}
+    first_batch = make_batches(lengths, cfg.capture_token_budget)[0]
+    try:
+        started = time.monotonic()
+        largest_acts, _ = forward_batch(model, chosen, [fit_items[row] for row in first_batch], answers.yes, answers.no, pad, device)
+        capture_speed = sum(lengths[row] for row in first_batch) / max(time.monotonic() - started, 1e-6)
+        check("Activations on the longest fit rows fit float16", float(np.abs(largest_acts).max()) < 65504.0 / 4, f"largest {float(np.abs(largest_acts).max()):.1f}")
+        measured["tokens_per_second_on_longest_rows"] = capture_speed
+    except Exception as error:
+        if not is_out_of_memory(error):
+            raise
+        # Capture lowers its token budget and carries on, so this costs time and nothing else.
+        print(f"WARNING  A full capture batch of the longest rows did not fit at budget {cfg.capture_token_budget}. Capture will lower its budget.", flush=True)
+        torch.cuda.empty_cache()
+
     # A measured speed, for the ETA.
     speed_rows = [sample_items[row] for row in sample_rows]
     started = time.monotonic()
     forward_batch(model, chosen, speed_rows, answers.yes, answers.no, pad, device)
     speed = sum(len(item.ids) for item in speed_rows) / max(time.monotonic() - started, 1e-6)
+    measured["tokens_per_second"] = speed
     print(f"Measured about {speed:.0f} tokens per second on this GPU, on a small batch", flush=True)
-
-    passed = all(entry["passed"] for entry in checks)
-    from ..checkpoint import atomic_write_bytes
-
-    atomic_write_bytes(paths.preflight(tag), json.dumps({"passed": passed, "checks": checks, "tokens_per_second": speed, "rung": tag}, indent=1, default=str).encode("utf-8"))
-    print("Dry run " + ("passed" if passed else "FAILED"), flush=True)
-    return passed
+    adapter_hours = training.steps * seconds_per_step / 3600.0
+    print(f"NOTE  At this rung one adapter takes at most about {adapter_hours:.1f} h at {training.steps} steps, from the longest rows. A real batch is shorter, and a whole run trains {len(CONDITIONS) * len(training.seeds)} of them.", flush=True)
+    return finish()

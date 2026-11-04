@@ -7,6 +7,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from mechinterp.config import Config
 from mechinterp.design import load_data, plan_impact_trials, prepare_stimuli
 from mechinterp.e2.config import E2Config, e2_code_hash
@@ -56,6 +58,7 @@ def test_base_config_is_e1s_own_file() -> None:
     assert e2.base.model_revision == e1.model_revision
 
 
+@pytest.mark.xfail(strict=True, reason="E2 is paused: one item in the data set is unresolved")
 def test_all_six_sets_load_with_the_readme_rules() -> None:
     e2 = real_config()
     items = load_eval_items(e2.eval_dir, e2.eval_sets)

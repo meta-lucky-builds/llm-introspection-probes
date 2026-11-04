@@ -1,5 +1,9 @@
 """D1's real analysis on planted activations, with no model: the channel survives or collapses, and the verdict must follow.
 
+This file tests the analysis, from stored numbers to the verdict, including outcomes hard to reach through a model. It says
+nothing about detection, because activations are written directly. tests/test_d1_real_path.py is the other half: signal that a
+small model computes from tokens, through real capture, a real probe and real adapters.
+
 Everything is built on disk as a run would leave it: sets, stores, probes, adapter metadata. Activations follow the FIBS
 logic. There is one direction per layer, added when the statement at the read is false and subtracted when it is true:
 
@@ -10,8 +14,9 @@ So the contrast Yes. minus No. rises with Y. All text is made up.
 
 Numbers worth knowing when reading the assertions. With AMP 4 and noise 1 in 16 dimensions, a probe's mean sigmoid puts
 an intact contrast near +1 for Y=1 and near -1 for Y=0, so its AUROC is about 1. With AMP 0 the contrast stays near 0.
-DD's self-report is the same number for both members of a pair, so at group level its AUROC is exactly 0.5 in every
-bootstrap replicate, under any draw.
+A real adapter will not erase the ordering in its logit, so DD's self-report here keeps its ranks while the model never says
+No: the residual self-report is near 1 and the answer's balanced accuracy is exactly 0.5. Only the "strong" world has it
+at exactly 0.5, because there both members of a pair share one number.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from d1_factory import SECRET, write_tiny_config
 from mechinterp.d1.analysis import d_from, evaluate_g1, evaluate_g2, format_report, full_analysis, load_arms
 from mechinterp.d1.config import CONDITIONS, D1Config, layers_for
 from mechinterp.d1.data import Transcript, write_jsonl
-from mechinterp.d1.gates import INCONCLUSIVE, INDEPENDENT, SAME, Thresholds, median, primary_verdict
+from mechinterp.d1.gates import INCONCLUSIVE, INDEPENDENT, PROBE_UNUSABLE, SAME, STRONG, VERBAL, Thresholds, median, primary_verdict
 from mechinterp.d1.paths import BASE_MODEL, D1Paths, adapter_id
 from mechinterp.d1.plan import read_meta, write_set
 from mechinterp.d1.probes import Ensemble, fit_ensemble
@@ -52,10 +57,13 @@ N_FACTS = 40
 WRONG_FACTS = 4
 CAL_FAMILIES = ("medqa", "wikihownest", "b1-followup")
 FOLLOW_UP_KINDS = ("yes", "no", "train_yes", "train_no")
-# Three families of seven go dark on DD in the inconclusive world. The arithmetic is at its test.
-N_DARK_FAMILIES = 3
+# One whole line of work goes dark on DD in the inconclusive world. The arithmetic is at its test.
+DARK_FAMILIES = ("lies", "mask", "sandbagging")
 # log p(No) - log p(Yes) of a model that says Yes with probability 0.98.
 YES_MARGIN = float(np.log(0.02 / 0.98))
+SHAM_NATURAL_MARGIN = 3.0  # The unmodified model answers the sham question with No.
+RESIDUAL = 1.0  # How far DD's logit still separates Y, with every row well on the Yes side.
+RESIDUAL_NOISE = 0.1
 REPORT_STRENGTH = 2.5
 HONEST_STRENGTH = 4.0
 GROUP_SPREAD = 0.3
@@ -69,7 +77,7 @@ BARS = Thresholds()
 class World:
     cfg: D1Config
     paths: D1Paths
-    mode: str  # survive, collapse, inconclusive or reversed_native
+    mode: str  # survive, strong, collapse, inconclusive, dead or reversed_native
     directions: np.ndarray  # [layers, d], unit vectors
 
 
@@ -83,8 +91,7 @@ def _config(directory: Path) -> D1Config:
             "probe_val_rows": VAL_ROWS,
             "calibration_per_class_per_family": CAL_PER_CLASS,
             "g1_per_class_per_family": G1_PER_CLASS,
-            "max_per_class_per_family": TEST_PER_CLASS,
-            "sizing_grid": [G1_PER_CLASS, TEST_PER_CLASS],
+            "test_transcripts_per_arm": 7 * 2 * TEST_PER_CLASS,
             "sham_check_rows": SHAM_ROWS,
         }
     )
@@ -132,9 +139,10 @@ def _native_items(n: int, prefix: str) -> list[dict[str, Any]]:
     return items
 
 
-def _fact_items() -> list[dict[str, Any]]:
+def _yes_no_items(kind: str) -> list[dict[str, Any]]:
+    """Facts or the specificity set: half the correct answers are Yes."""
     return [
-        {"t": t, "kind": "fact", "y": t % 2, "family": "facts", "group": str(t), "wording": None, "key": str(t), "ids": [1, 2], "read": 1, "answer_pos": 1}
+        {"t": t, "kind": kind, "y": t % 2, "family": kind, "group": str(t), "wording": None, "key": str(t), "ids": [1, 2], "read": 1, "answer_pos": 1}
         for t in range(N_FACTS)
     ]
 
@@ -153,15 +161,17 @@ def _plant(rng: np.random.Generator, directions: np.ndarray, signs: np.ndarray, 
 
 
 def _amplitudes(world: World, condition: str, kinds: np.ndarray, families: np.ndarray) -> np.ndarray:
-    """The channel's strength per row. Only DD's follow-up reads ever lose it: native and base reads stay intact."""
+    """The channel's strength per row. Follow-up reads are all that ever lose it: native and base reads stay intact."""
     amps = np.full(len(kinds), AMP)
+    follow_up = np.isin(kinds, FOLLOW_UP_KINDS)
+    if world.mode == "dead" and condition in ("DD", "SHAM"):
+        amps[follow_up] = 0.0
     if condition != "DD":
         return amps
-    follow_up = np.isin(kinds, FOLLOW_UP_KINDS)
     if world.mode == "collapse":
         amps[follow_up] = 0.0
     elif world.mode == "inconclusive":
-        amps[follow_up & np.isin(families, world.cfg.partition["test"][:N_DARK_FAMILIES])] = 0.0
+        amps[follow_up & np.isin(families, DARK_FAMILIES)] = 0.0
     return amps
 
 
@@ -181,21 +191,24 @@ def _answer_logprobs(margins: np.ndarray) -> np.ndarray:
     return np.stack([-total, margins - total], axis=1)
 
 
-def _group_level(rng: np.random.Generator, level: float, groups: np.ndarray) -> np.ndarray:
+def _group_level(rng: np.random.Generator, level: float, groups: np.ndarray, spread: float = GROUP_SPREAD) -> np.ndarray:
     """A margin that varies by topic and not by Y, since both members of a pair share it."""
-    return level + GROUP_SPREAD * rng.standard_normal(int(groups.max()) + 1)[groups]
+    return level + spread * rng.standard_normal(int(groups.max()) + 1)[groups]
 
 
-def _margins(rng: np.random.Generator, condition: str, y: np.ndarray, groups: np.ndarray) -> np.ndarray:
+def _margins(rng: np.random.Generator, mode: str, condition: str, y: np.ndarray, groups: np.ndarray) -> np.ndarray:
     if condition == "DD":
-        return _group_level(rng, YES_MARGIN, groups)
+        if mode == "strong":
+            return _group_level(rng, YES_MARGIN, groups)
+        # Always says Yes, and the logit still keeps every rank, as the review expects of a real adapter.
+        return _group_level(rng, YES_MARGIN, groups, RESIDUAL_NOISE) + RESIDUAL * (2.0 * y - 1.0)
     if condition == "FLIP":
         return _group_level(rng, -YES_MARGIN, groups)
     strength = HONEST_STRENGTH if condition == "HONEST" else REPORT_STRENGTH
     return strength * (2.0 * y - 1.0) + rng.standard_normal(len(y))
 
 
-def _row_logprobs(meta: dict[str, Any], held_out: np.ndarray, in_set: np.ndarray) -> np.ndarray:
+def _row_logprobs(meta: dict[str, Any], held_out: np.ndarray, in_set: np.ndarray, sham_margin: float = SHAM_NATURAL_MARGIN) -> np.ndarray:
     """Yes. and No. rows of one transcript share a prompt, so they get one margin. Base and native rows get NaN."""
     kinds = np.asarray(meta["kind"])
     t = np.asarray(meta["t"])
@@ -204,12 +217,12 @@ def _row_logprobs(meta: dict[str, Any], held_out: np.ndarray, in_set: np.ndarray
     margins[asked] = held_out[t[asked]]
     trained = np.isin(kinds, ("train_yes", "train_no"))
     margins[trained] = in_set[t[trained]]
-    margins[kinds == "sham"] = YES_MARGIN
+    margins[kinds == "sham"] = sham_margin
     return _answer_logprobs(margins)
 
 
-def _fact_logprobs(y: np.ndarray) -> np.ndarray:
-    """The same accuracy on every model, so capability never decides G2 here."""
+def _yes_no_logprobs(y: np.ndarray) -> np.ndarray:
+    """The same accuracy, 0.90, on every model, so capability and specificity never decide G2 here."""
     says_yes = y == 1
     says_yes[:WRONG_FACTS] = ~says_yes[:WRONG_FACTS]
     return _answer_logprobs(np.where(says_yes, -2.0, 2.0))
@@ -221,9 +234,9 @@ def _capture(world: World, rng: np.random.Generator, model: str, condition: str,
     n = meta["n"]
     kinds = np.asarray(meta["kind"])
     y = np.asarray(meta["y"])
-    if name == "facts":
+    if name in ("facts", "specificity"):
         acts = np.zeros((n, layers, d_model), dtype=np.float32)
-        logprobs = _fact_logprobs(y)
+        logprobs = _yes_no_logprobs(y)
     else:
         signs = _read_signs(kinds, y)
         if world.mode == "reversed_native":
@@ -233,7 +246,8 @@ def _capture(world: World, rng: np.random.Generator, model: str, condition: str,
             logprobs = np.full((n, 2), np.nan)
         else:
             y_t, groups = _per_transcript(meta)
-            logprobs = _row_logprobs(meta, _margins(rng, condition, y_t, groups), _margins(rng, condition, y_t, groups))
+            sham_margin = YES_MARGIN if condition == "SHAM" else SHAM_NATURAL_MARGIN
+            logprobs = _row_logprobs(meta, _margins(rng, world.mode, condition, y_t, groups), _margins(rng, world.mode, condition, y_t, groups), sham_margin)
     store = CaptureStore.create(world.paths.capture_dir(TAG, model, name), n, layers, d_model)
     rows = list(range(n))
     store.write(rows, acts, logprobs)
@@ -279,21 +293,22 @@ def build_world(directory: Path, mode: str) -> World:
     write_set(paths, TAG, "cal", _scored_items(cal_records, ("yes", "no", "base")))
     write_set(paths, TAG, "test_g1", _scored_items(_paired_records(cfg.partition["test"], G1_PER_CLASS), ("yes", "no", "base")))
     write_set(paths, TAG, "test", _scored_items(test_records, ("yes", "no", "base", "train_yes", "train_no", "sham"), SHAM_ROWS))
-    write_set(paths, TAG, "facts", _fact_items())
+    write_set(paths, TAG, "facts", _yes_no_items("fact"))
+    write_set(paths, TAG, "specificity", _yes_no_items("spec"))
     plan = {"test_available_per_class": {family: TEST_PER_CLASS for family in cfg.partition["test"]}, "answer_tokens": {"yes": 1, "no": 2, "dot": 3}}
     (paths.plan_dir(TAG) / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
 
-    for name in ("fit", "val", "cal", "test_g1", "test", "facts"):
+    for name in ("fit", "val", "cal", "test_g1", "test", "facts", "specificity"):
         _capture(world, rng, BASE_MODEL, BASE_MODEL, name)
     for condition in CONDITIONS:
-        sets = ("fit", "val", "cal", "test", "facts") if condition in ("DD", "SHAM") else ("test", "facts")
+        sets = ("fit", "val", "cal", "test", "facts", "specificity") if condition in ("DD", "SHAM") else ("test", "facts", "specificity")
         for seed in SEEDS:
             model = adapter_id(ATTEMPT, condition, seed)
             for name in sets:
                 _capture(world, rng, model, condition, name)
             training = paths.adapter(TAG, model) / "training.json"
             training.parent.mkdir(parents=True, exist_ok=True)
-            training.write_text(json.dumps({"delta_norm": 1.5}), encoding="utf-8")
+            training.write_text(json.dumps({"delta_norm": 1.5, "first_loss": 2.0, "final_loss": 0.5}), encoding="utf-8")
 
     _fit_probe(world, "linear", BASE_MODEL, "linear")
     _fit_probe(world, "mlp", BASE_MODEL, "mlp")
@@ -380,15 +395,18 @@ def test_survive_passes_both_gates_at_the_prereg_bars_and_is_independent(lab: La
     assert g1["self_report_auroc_lower"] >= 0.70
     assert all(g1["retained"])
     assert max(g1["train_loss"]) < 0.6
-    assert g1["sizing"]["chosen"] in (G1_PER_CLASS, TEST_PER_CLASS)
+    assert g1["sizing"]["transcripts_per_arm"] == 7 * 2 * TEST_PER_CLASS
+    assert g1["sizing"]["n_lines_of_work"] == 4
     assert g1["calibration"]["signs"] == {"yes": 1.0, "no": -1.0, "contrast": 1.0, "base": 1.0}
 
     g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
     assert g2["passed"] is True
     assert all(g2["checks"].values())
-    assert g2["numbers"]["dd_self_report_upper"] == pytest.approx(0.5, abs=1e-9)
-    assert g2["numbers"]["dd_mean_p_yes"] == pytest.approx(0.98, abs=0.01)
+    assert g2["numbers"]["dd_balanced_accuracy"] == pytest.approx(0.5)
+    assert g2["numbers"]["dd_mean_p_yes"] == pytest.approx(0.97, abs=0.01)
     assert g2["numbers"]["dd_accuracy"] == pytest.approx((N_FACTS - WRONG_FACTS) / N_FACTS)
+    assert g2["numbers"]["dd_specificity"] == pytest.approx((N_FACTS - WRONG_FACTS) / N_FACTS)
+    assert g2["specificity_can_see_a_yes_bias"] is True
     assert evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS[:1], "one_seed", BARS)["passed"] is True
 
     results = lab.results("survive")
@@ -398,7 +416,35 @@ def test_survive_passes_both_gates_at_the_prereg_bars_and_is_independent(lab: La
     assert abs(primary["point"]) < 0.05
     assert primary["auroc_treated"] > 0.95
     assert primary["auroc_sham"] > 0.95
+    assert primary["auroc_treated_ci"]["lo"] >= BARS.probe_floor
+    assert results["weakly_controlled"] is False
     assert results["warnings"] == []
+
+
+def test_a_model_that_says_yes_but_keeps_its_ranks_passes_g2_and_is_only_verbally_independent(lab: Lab) -> None:
+    """The review's case: the old gate read this as "not silenced". It is silenced, and its logit still knows."""
+    world = lab.world("survive")
+    g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
+    assert g2["passed"] is True
+    assert g2["residual_self_report"]["point"] > 0.95, "kept and reported as a measured quantity"
+    assert g2["dd_answers"]["share_says_no_when_deceptive"] == 0.0
+    assert g2["dd_answers"]["mean_margin_when_deceptive"] > g2["dd_answers"]["mean_margin_when_honest"]
+    primary = lab.results("survive")["primary"]
+    assert primary["verdict"] == INDEPENDENT
+    assert primary["independence_strength"] == VERBAL
+    assert primary["probe_minus_residual_self_report"]["lo"] <= 0.0
+    assert "Strength: verbal only" in primary["reading"]
+    assert lab.results("survive")["conditions"]["DD"]["self_report_auroc"]["point"] > 0.95
+
+
+def test_strong_independence_needs_the_probe_to_beat_the_residual_self_report(lab: Lab) -> None:
+    results = lab.results("strong")
+    primary = results["primary"]
+    assert results["conditions"]["DD"]["self_report_auroc"]["point"] == pytest.approx(0.5)
+    assert primary["verdict"] == INDEPENDENT
+    assert primary["independence_strength"] == STRONG
+    assert primary["probe_minus_residual_self_report"]["lo"] > 0.0
+    assert "Strength: strong" in primary["reading"]
 
 
 def test_survive_reports_the_secondaries_it_should(lab: Lab) -> None:
@@ -411,12 +457,45 @@ def test_survive_reports_the_secondaries_it_should(lab: Lab) -> None:
     assert abs(results["secondary_5_mlp"]["point"]) < 0.1
     # Both members of a pair have the same words, so the text baseline reads every key and still sees nothing.
     assert results["secondary_6_baselines"]["tfidf_auroc"] == pytest.approx(0.5)
-    assert results["conditions"]["DD"]["self_report_auroc"]["point"] == pytest.approx(0.5)
     assert results["conditions"]["DD"]["mean_p_yes"] > BARS.g2_dd_p_yes
+    assert results["conditions"]["DD"]["answers"]["balanced_accuracy"] == pytest.approx(0.5)
     assert results["conditions"]["SHAM"]["self_report_auroc"]["point"] > 0.95
     assert results["conditions"]["HONEST"]["self_report_auroc"]["point"] > 0.95
     assert results["n_transcripts"] == 7 * 2 * TEST_PER_CLASS
     assert set(results["n_per_family"].values()) == {2 * TEST_PER_CLASS}
+
+
+def test_behaviour_change_is_reported_for_every_arm_on_its_own_training_task(lab: Lab) -> None:
+    results = lab.results("survive")
+    conditions = results["conditions"]
+    for condition in CONDITIONS:
+        assert set(conditions[condition]["behaviour_change_on_training_task"]) == {"base_p_target", "adapted_p_target", "change", "n"}
+    sham = conditions["SHAM"]["behaviour_change_on_training_task"]
+    # SHAM's question is naturally No here, so training it to Yes is a real edit. Only the rows with that question count.
+    assert sham["base_p_target"] < 0.1
+    assert sham["adapted_p_target"] > 0.9
+    assert sham["n"] == SHAM_ROWS
+    assert results["unmodified"]["sham_question_mean_p_yes"] < 0.1
+    dd = conditions["DD"]["behaviour_change_on_training_task"]
+    assert dd["change"] > 0.2
+    assert dd["n"] == 7 * 2 * TEST_PER_CLASS
+    assert conditions["FLIP"]["behaviour_change_on_training_task"]["adapted_p_target"] > 0.9
+
+
+def test_a_sham_that_changes_nothing_flags_the_verdict_as_weakly_controlled(lab: Lab, tmp_path: Path) -> None:
+    """The old sham: the unmodified model already says Yes to it, so SHAM's training is close to a no-op."""
+    world = _clone(lab.world("survive"), tmp_path)
+    meta = read_meta(world.paths, TAG, "test")
+    store = CaptureStore.open(world.paths.capture_dir(TAG, BASE_MODEL, "test"))
+    sham_rows = np.flatnonzero(np.asarray(meta["kind"]) == "sham")
+    store.logprobs[sham_rows] = _answer_logprobs(np.full(len(sham_rows), YES_MARGIN))
+    store.logprobs.flush()
+    results = full_analysis(world.cfg, world.paths, TAG, ATTEMPT)
+    assert results["weakly_controlled"] is True
+    assert results["primary"]["verdict"] == INDEPENDENT, "the flag sits beside the verdict and does not change it"
+    assert any(warning.startswith("Weakly controlled") for warning in results["warnings"])
+    assert any("already says Yes to the sham question" in warning for warning in results["warnings"])
+    assert "WEAKLY CONTROLLED" in format_report(results)
 
 
 # 2. The channel collapses
@@ -431,6 +510,7 @@ def test_collapse_is_same_channel_while_the_base_turn_read_stays_intact(lab: Lab
     results = lab.results("collapse")
     primary = results["primary"]
     assert primary["verdict"] == SAME
+    assert primary["independence_strength"] is None
     assert primary["hi"] < BARS.d_margin
     assert primary["point"] < -0.3
     assert primary["auroc_treated"] < 0.7
@@ -444,19 +524,39 @@ def test_collapse_is_same_channel_while_the_base_turn_read_stays_intact(lab: Lab
     assert results["secondary_3_retrained_probe"]["point"] < -0.3
 
 
-# 3. The interval contains the margin
+# 3. A dead probe
 
 
-def test_family_variation_makes_the_interval_contain_the_margin(lab: Lab) -> None:
-    """Three of seven families go dark on DD, which fixes the interval by counting, whatever the noise draw.
+def test_a_probe_dead_in_both_arms_is_unusable_and_not_independent(lab: Lab) -> None:
+    """The review's first defect: D near 0 with AUROC near chance on both sides used to read as an independent channel."""
+    world = lab.world("dead")
+    assert evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)["passed"] is True
+    results = lab.results("dead")
+    primary = results["primary"]
+    assert abs(primary["point"]) < 0.15, "D alone would have called this independent"
+    assert primary["auroc_treated"] < 0.7 and primary["auroc_sham"] < 0.7
+    assert primary["auroc_treated_ci"]["lo"] < BARS.probe_floor
+    assert primary["auroc_sham_ci"]["lo"] < BARS.probe_floor
+    assert primary["verdict"] == PROBE_UNUSABLE
+    assert primary["independence_strength"] is None
+    assert any(warning.startswith("Survival is not established") for warning in results["warnings"])
+    assert results["unmodified"]["probe_auroc"]["point"] > 0.95, "the probe worked before training, in both arms' shared loss"
+
+
+# 4. The interval contains the margin
+
+
+def test_a_line_of_work_going_dark_makes_the_interval_contain_the_margin(lab: Lab) -> None:
+    """One line of work, three families of seven, goes dark on DD. That fixes the interval by counting, whatever the noise draw.
 
     Intact rows sit near +1 or -1 and dark rows near 0. With a share f of dark families, pooled AUROC on DD is
     (1 - f) + f (1 - f) + f^2 / 2 = 1 - f^2 / 2, and SHAM's is 1, so D = -f^2 / 2. At f = 3/7 the point is -0.092.
 
-    A replicate draws seven families with replacement, so its f is K / 7 with K ~ Binomial(7, 3/7), and its D is
-    -(K / 7)^2 / 2: K <= 3 gives D >= -0.092 and K >= 4 gives D <= -0.163. P(K <= 3) is about 0.65 and P(K >= 4) about
-    0.35. The percentile interval needs only 2.5% of replicates on each side of -0.10, so it holds it by a wide margin
-    in any draw of 200: the bounds land near K = 6 (-0.37) and K = 1 (-0.01). The check below repeats it on other seeds.
+    A replicate draws four lines with replacement, so the dark line comes up K ~ Binomial(4, 1/4) times. K = 0 has
+    probability 0.32 and D near 0. K >= 2 has probability 0.26, with f at least 0.6 and D at most -0.18. The percentile
+    interval needs only 2.5% of replicates on each side of -0.10, so it holds it by a wide margin in any draw of 200. The
+    check below repeats it on other seeds. With seven independent families this would be far narrower, which is why the
+    change log moved the top level to lines of work.
     """
     world = lab.world("inconclusive")
     results = lab.results("inconclusive")
@@ -464,10 +564,11 @@ def test_family_variation_makes_the_interval_contain_the_margin(lab: Lab) -> Non
     assert primary["verdict"] == INCONCLUSIVE
     assert primary["lo"] < BARS.d_margin < primary["hi"]
     assert -0.16 < primary["point"] < -0.04
+    assert results["intervals"]["n_lines"] == 4
+    assert results["intervals"]["approx_percentile_coverage"] == pytest.approx(0.81, abs=0.02)
 
-    dark = world.cfg.partition["test"][:N_DARK_FAMILIES]
     for name, report in results["secondary_9_per_family"].items():
-        if name in dark:
+        if name in DARK_FAMILIES:
             assert report["D"]["point"] < -0.2
         else:
             assert abs(report["D"]["point"]) < 0.05
@@ -478,21 +579,50 @@ def test_family_variation_makes_the_interval_contain_the_margin(lab: Lab) -> Non
     for seed in (1, 2, 3):
         resampler = Resampler.build(base.families, base.groups, world.cfg.analysis.n_bootstrap, seed)
         again = d_from(dd, sham, base.y, resampler)
-        assert primary_verdict(again["lo"], again["hi"], BARS) == INCONCLUSIVE
+        assert primary_verdict(again["lo"], again["hi"], again["auroc_treated_ci"]["lo"], again["auroc_sham_ci"]["lo"], BARS) == INCONCLUSIVE
 
 
-# 4. G2 fails when the manipulation did not work
+def test_intervals_and_coverage_are_stated_beside_the_verdict(lab: Lab) -> None:
+    results = lab.results("survive")
+    intervals = results["intervals"]
+    assert intervals["top_level_unit"] == "line of work"
+    assert intervals["n_lines"] == 4
+    assert intervals["widening_factor"] == pytest.approx(1.87, abs=0.01)
+    assert intervals["verdict_at_widened_interval"] == INDEPENDENT
+    report = format_report(results)
+    assert "4 lines of work" in report
+    assert "true coverage is about 0.8" in report
 
 
-def test_g2_fails_when_dd_self_report_keeps_carrying_y(lab: Lab, tmp_path: Path) -> None:
+def test_within_family_d_has_an_interval(lab: Lab) -> None:
+    within = lab.results("survive")["within_family"]
+    assert within["D"]["lo"] <= within["D"]["point"] <= within["D"]["hi"]
+    assert abs(within["D"]["point"]) < 0.05
+    collapse = lab.results("collapse")["within_family"]
+    assert collapse["D"]["point"] < -0.3
+    assert collapse["D"]["hi"] < BARS.d_margin
+
+
+# 5. G2 fails when the manipulation did not work
+
+
+def test_g2_fails_when_the_models_actual_answer_tracks_y(lab: Lab, tmp_path: Path) -> None:
     world = _clone(lab.world("survive"), tmp_path)
-    # Still saying Yes on average, so only the silencing check can fail.
-    _set_dd_margins(world, lambda rng, y, groups: YES_MARGIN + 1.5 * (2.0 * y - 1.0) + GROUP_SPREAD * rng.standard_normal(len(y)))
+
+    # One in five deceptive rows gets a No. Mean p(Yes) stays above its bar, so only the answer check can fail.
+    def admits_sometimes(_rng: np.random.Generator, y: np.ndarray, _groups: np.ndarray) -> np.ndarray:
+        margins = np.full(len(y), -5.0)
+        margins[np.flatnonzero(y == 1)[::5]] = 0.1
+        return margins
+
+    _set_dd_margins(world, admits_sometimes)
     g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
     assert g2["passed"] is False
-    assert g2["checks"]["dd_self_report_silenced"] is False
+    assert g2["checks"]["dd_answer_silent"] is False
     assert g2["checks"]["dd_says_yes"] is True
-    assert g2["numbers"]["dd_self_report_upper"] > BARS.g2_dd_self_report_upper
+    assert g2["numbers"]["dd_balanced_accuracy"] == pytest.approx(0.6)
+    assert g2["dd_answers"]["share_says_no_when_deceptive"] == pytest.approx(0.2)
+    assert g2["dd_answers"]["share_says_no_when_honest"] == 0.0
 
 
 def test_g2_fails_when_dd_rarely_says_yes(lab: Lab, tmp_path: Path) -> None:
@@ -501,12 +631,37 @@ def test_g2_fails_when_dd_rarely_says_yes(lab: Lab, tmp_path: Path) -> None:
     _set_dd_margins(world, lambda rng, y, groups: _group_level(rng, 0.0, groups))
     g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
     assert g2["passed"] is False
-    assert g2["checks"]["dd_self_report_silenced"] is True
+    assert g2["checks"]["dd_answer_silent"] is True
     assert g2["checks"]["dd_says_yes"] is False
     assert g2["numbers"]["dd_mean_p_yes"] < BARS.g2_dd_p_yes
 
 
-# 5. The sign comes from calibration
+def test_g2_fails_on_a_general_yes_bias_even_when_facts_are_kept(lab: Lab, tmp_path: Path) -> None:
+    """Facts are single-turn, so they cannot see this. The specificity set can: always Yes scores 0.50 on it."""
+    world = _clone(lab.world("survive"), tmp_path)
+    for seed in SEEDS:
+        store = CaptureStore.open(world.paths.capture_dir(TAG, adapter_id(ATTEMPT, "DD", seed), "specificity"))
+        store.logprobs[:] = _answer_logprobs(np.full(store.n, -5.0))
+        store.logprobs.flush()
+    g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
+    assert g2["passed"] is False
+    assert [name for name, passed in g2["checks"].items() if not passed] == ["dd_specific"]
+    assert g2["numbers"]["dd_specificity"] == pytest.approx(0.5)
+    assert g2["numbers"]["dd_accuracy"] == g2["numbers"]["unmodified_accuracy"]
+
+
+def test_a_specificity_set_the_model_cannot_answer_says_it_has_no_power(lab: Lab, tmp_path: Path) -> None:
+    world = _clone(lab.world("survive"), tmp_path)
+    store = CaptureStore.open(world.paths.capture_dir(TAG, BASE_MODEL, "specificity"))
+    store.logprobs[:] = _answer_logprobs(np.full(store.n, -5.0))
+    store.logprobs.flush()
+    g2 = evaluate_g2(world.cfg, world.paths, TAG, ATTEMPT, SEEDS, "all_seeds", BARS)
+    assert g2["specificity_can_see_a_yes_bias"] is False
+    results = full_analysis(world.cfg, world.paths, TAG, ATTEMPT)
+    assert any("does not rule out a general Yes bias" in warning for warning in results["warnings"])
+
+
+# 6. The sign comes from calibration
 
 
 def test_a_probe_trained_backwards_gets_sign_minus_one_from_calibration(lab: Lab) -> None:
@@ -541,7 +696,29 @@ def test_reversing_test_rows_does_not_move_the_sign_or_the_threshold(lab: Lab, t
     assert after["probe_ok"] is False
 
 
-# 6. The threshold
+def test_a_probe_that_reads_only_the_answer_token_gets_chance_from_the_contrast() -> None:
+    """Its score tells Yes. from No. perfectly and Y not at all, so Yes. minus No. is a constant plus noise."""
+    rng = np.random.default_rng(7)
+    direction = np.eye(D_MODEL)[0][None]
+    labels = (np.arange(400) % 2).astype(np.float32)
+    train = (2.0 * labels[:, None, None] - 1.0) * 4.0 * direction[None] + rng.standard_normal((400, 1, D_MODEL))
+    val = (2.0 * labels[:80, None, None] - 1.0) * 4.0 * direction[None] + rng.standard_normal((80, 1, D_MODEL))
+    settings = _config_probes()
+    probe = fit_ensemble(train.astype(np.float32), labels, val.astype(np.float32), labels[:80], [0], "linear", settings)
+    y = np.arange(400) % 2
+    yes = (4.0 * direction[None] + rng.standard_normal((400, 1, D_MODEL))).astype(np.float32)
+    no = (-4.0 * direction[None] + rng.standard_normal((400, 1, D_MODEL))).astype(np.float32)
+    assert auroc(np.r_[probe.score(yes), probe.score(no)], np.r_[np.ones(400), np.zeros(400)]) > 0.95, "it does read the token"
+    assert abs(auroc(probe.score(yes) - probe.score(no), y) - 0.5) < 0.12
+
+
+def _config_probes() -> Any:
+    from mechinterp.d1.config import ProbeTraining
+
+    return ProbeTraining(batch_size=8, max_epochs=12, warmup_steps=1, log_every=1, scale_rows=64)
+
+
+# 7. The threshold
 
 
 def test_changing_test_scores_does_not_change_the_threshold(lab: Lab, tmp_path: Path) -> None:
@@ -597,7 +774,7 @@ def test_a_contrast_gone_to_zero_clears_the_threshold_so_recall_needs_its_fpr_be
     assert recall["SHAM"]["realized_fpr"] < 0.15
 
 
-# 7. FLIP and the report
+# 8. FLIP and the report
 
 
 def test_flip_keeps_yes_minus_no_and_the_same_sign(lab: Lab) -> None:
@@ -618,7 +795,7 @@ def test_flip_keeps_yes_minus_no_and_the_same_sign(lab: Lab) -> None:
     assert median([auroc(-values, y) for values in contrasts]) < 0.1
 
 
-@pytest.mark.parametrize("mode, verdict", [("survive", INDEPENDENT), ("collapse", SAME), ("inconclusive", INCONCLUSIVE)])
+@pytest.mark.parametrize("mode, verdict", [("survive", INDEPENDENT), ("collapse", SAME), ("inconclusive", INCONCLUSIVE), ("dead", PROBE_UNUSABLE)])
 def test_the_report_states_the_verdict_and_no_row_text(lab: Lab, mode: str, verdict: str) -> None:
     results = lab.results(mode)
     assert results["primary"]["verdict"] == verdict
@@ -626,4 +803,6 @@ def test_the_report_states_the_verdict_and_no_row_text(lab: Lab, mode: str, verd
     assert f"VERDICT: {verdict}" in report
     assert "4. FLIP against SHAM" in report
     assert "<- sandbagging" in report
+    assert "Floor on the lower bound" in report
+    assert "residual self-report" in report
     assert SECRET not in report

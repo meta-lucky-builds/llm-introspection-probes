@@ -3,18 +3,23 @@
 #
 #     bash scripts/run_d1_gpu.sh
 #
-# It checks the machine, installs what is missing, downloads the data and the models as the ladder needs them, runs the
-# dry-run checks for each model, runs every stage across all GPUs and writes the results folder. It keeps running if the
-# terminal closes. Running it again attaches to a live run, resumes an interrupted one, or prints the final state of one
-# that ended, without restarting anything. One 24 GB GPU is enough up to Qwen3-8B. Qwen3-14B needs 36 GB.
+# It checks the machine, then the pins, then installs what is missing, checks the data, and only then downloads models,
+# as the ladder needs them. It runs the dry-run checks for each model, runs every stage across all GPUs and writes the
+# results folder. Everything that can fail cheaply comes first. It keeps running if the terminal closes. Running it again
+# attaches to a live run, resumes an interrupted one, or prints the final state of one that ended, without restarting
+# anything. One 24 GB GPU is enough up to Qwen3-8B. Qwen3-14B needs 36 GB. The first step prints how far this machine's disk
+# and RAM reach.
 #
 # Every outcome the prereg names ends as DONE, with the outcome in the report: G1 failed through the ladder, G2 failed
-# after its retry, or a verdict, inconclusive included. FAILED means the run itself broke, and that says nothing about D1.
+# after its retry, or a verdict, inconclusive and probe unusable included. FAILED means the run itself broke, and that says
+# nothing about D1.
 #
 # Optional environment:
 #   D1_ON_FINISH        Shell command to run after the final state is saved, for example to stop the machine or
 #                       send a message. It sees D1_FINAL_STATUS, either DONE or FAILED. Default: nothing
 #   D1_RETRY            Set to 1 to resume a run that ended as FAILED. Finished work is kept
+#   D1_REANALYZE        Set to 1 on a run that ended as DONE, after a fix to analysis code or the analysis config:
+#                       recomputes gates and the report from stored numbers, with no GPU work, and rewrites the results
 #   D1_STALL_MINUTES    Kill a loaded worker after this long with no progress. Default 30
 #   D1_CONFIG           Config file. Default: experiments/d1_double_down/configs/full.json
 #   D1_STATE_DIR        Checkpoints, venv, model cache and results. Default: /workspace/d1_double_down if
@@ -48,8 +53,6 @@ PROBE_OUTPUT="$STATE/probe.txt"
 RESULTS_DIR="$STATE/results"
 SUMMARY="$RESULTS_DIR/summary.txt"
 FAILURE_REASON_FILE="$RUN_DIR/failure_reason.txt"
-MIN_DISK_GB=70
-MIN_RESUME_DISK_GB=10
 MIN_GPU_FREE_MIB=14336
 MIN_GPU_FREE_TEXT="14 GB"
 NVIDIA_SMI_SECONDS=60
@@ -302,7 +305,7 @@ scan_gpus() {
 }
 
 check_machine() {
-  say "Step 1 of 6: checking this machine"
+  say "Step 1 of 7: checking this machine"
   command -v nvidia-smi >/dev/null 2>&1 \
     || die "nvidia-smi was not found, so this does not look like an NVIDIA GPU machine."
   step "$NVIDIA_SMI_SECONDS" "nvidia-smi" nvidia-smi </dev/null
@@ -319,31 +322,21 @@ check_machine() {
   say "  Using $N_GPUS GPU(s): $GPU_LIST. The smallest has $((GPU_FREE_MIB / 1024)) GB free, which decides how far the ladder can go."
   FIRST_GPU="${GPU_LIST%%,*}"
 
-  local free_disk_gb needed_disk_gb
-  free_disk_gb="$(df -Pk "$STATE" | awk 'NR==2 {print int($4 / 1048576)}')"
-  needed_disk_gb="$MIN_DISK_GB"
-  if [[ -f "$VENV/.d1_ready" && -f "$STATE/.model_ready" ]]; then
-    needed_disk_gb="$MIN_RESUME_DISK_GB"
-  fi
-  say "  Free disk at $STATE: ${free_disk_gb} GB (need ${needed_disk_gb} GB)"
-  ((free_disk_gb >= needed_disk_gb)) \
-    || die "Only ${free_disk_gb} GB of disk is free at $STATE. This needs ${needed_disk_gb} GB. Free some, or set D1_STATE_DIR to a bigger disk."
+  FREE_DISK_GB="$(df -Pk "$STATE" | awk 'NR==2 {print int($4 / 1000000)}')"
+  say "  Free disk at $STATE: ${FREE_DISK_GB} GB"
 
   # A container's memory limit can be far below what the host reports as available.
-  local ram_kb limit_bytes limit_kb ram_gb min_ram_gb
+  local ram_kb limit_bytes limit_kb
   ram_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
   limit_bytes="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)"
   if [[ "$limit_bytes" =~ ^[0-9]+$ ]]; then
     limit_kb=$((limit_bytes / 1024))
     ((limit_kb >= ram_kb)) || ram_kb="$limit_kb"
   fi
-  ram_gb=$((ram_kb / 1048576))
-  # One load of the largest model a 24 GB GPU can run holds about 17 GB of weights in RAM, loaded workers keep about
-  # 3 GB each, the probe stage holds a set of activations, and the system needs some.
-  min_ram_gb=$((17 + 3 * N_GPUS + 6))
-  say "  Available RAM: ${ram_gb} GB (need ${min_ram_gb} GB)"
-  ((ram_gb >= min_ram_gb)) || die "Only ${ram_gb} GB of RAM is available. Loading the model on $N_GPUS GPU(s) needs about ${min_ram_gb} GB."
-  LOAD_SLOTS=$(((ram_gb - 6 - 3 * N_GPUS) / 20))
+  RAM_GB=$((ram_kb / 1048576))
+  say "  Available RAM: ${RAM_GB} GB"
+  # Weights go straight from the file to the GPU, so a load costs a few GB of RAM and not a whole model. Step 2 judges all this.
+  LOAD_SLOTS=$(((RAM_GB - 4) / 6))
   ((LOAD_SLOTS >= 1)) || LOAD_SLOTS=1
   ((LOAD_SLOTS <= N_GPUS)) || LOAD_SLOTS="$N_GPUS"
   say "  Workers will load the model at most $LOAD_SLOTS at a time"
@@ -356,6 +349,38 @@ check_machine() {
   say "  $cpus CPU(s), so $THREADS_PER_WORKER thread(s) per worker"
 }
 
+# Standard library only and seconds long, so these come before anything is installed. A resume has its software and data in
+# place, so a remote it cannot reach is only a warning there, and disk is left to the orchestrator, which knows what is stored.
+early_checks() {
+  say "Step 2 of 7: how far this machine reaches, and whether the pins still hold"
+  local python="${VENV}/bin/python" code=0 resuming=()
+  if [[ -f "$VENV/.d1_ready" && -x "$python" ]]; then
+    :
+  else
+    find_python
+    python="$BASE_PYTHON"
+  fi
+  if [[ -f "$VENV/.d1_ready" && -f "$STATE/.data_ready" ]]; then
+    resuming=(--resuming)
+  fi
+  "$python" -m mechinterp.d1.cli capacity --config "$CONFIG" --free-disk-gb "$FREE_DISK_GB" --ram-gb "$RAM_GB" \
+    --gpu-free-gb "$((GPU_FREE_MIB / 1024))" --n-gpus "$N_GPUS" "${resuming[@]}" </dev/null \
+    || die "This machine cannot run the first rung. See the lines above. Free some disk, set D1_STATE_DIR to a bigger disk, or use a larger machine."
+  bounded 300 "$python" -m mechinterp.d1.cli check-pins --config "$CONFIG" </dev/null || code=$?
+  case "$code" in
+    0) ;;
+    3)
+      if ((${#resuming[@]} > 0)); then
+        say "  Carrying on, since everything needed is already here"
+      else
+        die "Hugging Face cannot be reached from this machine, so nothing can be downloaded. See the line above."
+      fi
+      ;;
+    1) die "A pinned model or dataset is not what the config says. See the line above. This is not a machine problem." ;;
+    *) check_code "$code" 300 "Checking the pins" ;;
+  esac
+}
+
 python_is_usable() {
   # transformers 5.22 needs 3.11 or newer, and torch wheels lag the newest Python.
   "$1" -c 'import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] <= (3, 13) else 1)' 2>/dev/null
@@ -363,6 +388,7 @@ python_is_usable() {
 
 find_python() {
   local candidate
+  [[ -z "${BASE_PYTHON:-}" ]] || return 0
   for candidate in "${D1_PYTHON:-}" python3.13 python3.12 python3.11 python3 python; do
     [[ -n "$candidate" ]] || continue
     command -v "$candidate" >/dev/null 2>&1 || continue
@@ -458,6 +484,7 @@ probe_environment() {
   CUDA_VISIBLE_DEVICES="$FIRST_GPU" bounded "$PROBE_SECONDS" "$PY" - >"$PROBE_OUTPUT" <<'PROBE' || code=$?
 import sys
 
+import accelerate  # noqa: F401  (a device_map, which loads weights straight to the GPU, needs it)
 import huggingface_hub
 import jinja2  # noqa: F401
 import numpy
@@ -522,7 +549,7 @@ install_torch() {
 }
 
 install_dependencies() {
-  say "Step 2 of 6: Python environment in $VENV"
+  say "Step 3 of 7: Python environment in $VENV"
   PY="$VENV/bin/python"
   TORCH_SOURCE="kept from the existing venv"
   if [[ -f "$VENV/.d1_ready" && -x "$PY" ]] && probe_environment; then
@@ -533,7 +560,7 @@ install_dependencies() {
     make_venv
     bounded "$PIP_SECONDS" "$PY" -m pip install --quiet --upgrade pip </dev/null || say "  Could not upgrade pip. Carrying on."
     step "$PIP_SECONDS" "Installing transformers with pip" \
-      "$PY" -m pip install --quiet "transformers==5.22.*" numpy "jinja2>=3.1" huggingface_hub safetensors pyarrow </dev/null
+      "$PY" -m pip install --quiet "transformers==5.22.*" "accelerate>=1.1.0" numpy "jinja2>=3.1" huggingface_hub safetensors pyarrow </dev/null
     if probe_environment; then
       TORCH_SOURCE="reused the torch already on this machine"
       say "  Reusing the torch already on this machine"
@@ -555,9 +582,9 @@ install_dependencies() {
   say "  Recorded in $ENV_REPORT"
 }
 
-download_model() {
-  say "Step 3 of 6: downloading FIBS and the first model on the ladder, once, before any worker starts"
-  if [[ -f "$STATE/.model_ready" ]]; then
+download_data() {
+  say "Step 4 of 7: downloading FIBS, once, before any model. The first run step checks it against the published counts."
+  if [[ -f "$STATE/.data_ready" ]]; then
     say "  Already in $HF_HOME"
     return 0
   fi
@@ -583,19 +610,12 @@ dataset = config["dataset"]
 # The data is cached on this machine only. It has no license tag, so it is never copied into the repo or the results.
 snapshot_download(dataset["repo"], repo_type="dataset", revision=dataset["revision"], allow_patterns=["data/*.parquet"])
 print(f"FIBS at {dataset['revision']} is cached")
-model = config["ladder"][0]
-path = snapshot_download(
-    model["name"],
-    revision=model["revision"],
-    ignore_patterns=["*.bin", "*.pt", "*.pth", "*.gguf", "*.h5", "*.msgpack", "*.ot", "*.onnx"],
-)
-print(f"Model at {path}")
 DOWNLOAD
     then
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true
       WATCHER_PID=""
-      touch "$STATE/.model_ready"
+      touch "$STATE/.data_ready"
       return 0
     fi
     sleep $((attempt * 20))
@@ -604,7 +624,7 @@ DOWNLOAD
 }
 
 run_stages() {
-  say "Step 4 of 6: running every stage on $N_GPUS GPU(s). Each model starts with its dry-run checks, printed as PASS or FAIL."
+  say "Step 5 of 7: running every stage on $N_GPUS GPU(s). The data check comes first. Each model starts with its dry-run checks, printed as PASS or FAIL."
   say "  Progress and a stage ETA are printed about once a minute. A worker with no progress for $STALL_MINUTES minutes is killed."
   local code=0 idle
   # The orchestrator prints every minute, and handles wedged workers itself. This covers the orchestrator.
@@ -619,7 +639,7 @@ run_stages() {
 }
 
 write_results() {
-  say "Step 5 of 6: writing results"
+  say "Step 6 of 7: writing results"
   local code=0
   rm -f "$FAILURE_REASON_FILE"
   mkdir -p "$RESULTS_DIR"
@@ -670,14 +690,15 @@ inner_main() {
   export PYTHONPATH="$REPO_ROOT/src"
 
   check_machine
+  early_checks
   install_dependencies
-  download_model
-  # From here workers read the cache and need no network. The orchestrator fetches a later rung itself, if the ladder gets there.
+  download_data
+  # From here workers read the cache and need no network. The orchestrator fetches each rung itself, when the ladder gets there.
   export HF_HUB_OFFLINE=1
   export TRANSFORMERS_OFFLINE=1
   run_stages
   write_results
-  say "Step 6 of 6: finished"
+  say "Step 7 of 7: finished"
   banner_done
   trap - ERR
 }
@@ -731,6 +752,25 @@ print_final_state() {
   print_status_banner
 }
 
+# Runs in the foreground and starts no worker, so it takes no GPU and cannot change anything stored but gates and reports.
+reanalyze() {
+  local py="$VENV/bin/python"
+  [[ -x "$py" ]] || {
+    say "No environment at $VENV, so nothing can be re-analyzed here."
+    return 1
+  }
+  export PYTHONPATH="$REPO_ROOT/src"
+  export HF_HUB_OFFLINE=1
+  export TRANSFORMERS_OFFLINE=1
+  export TOKENIZERS_PARALLELISM=false
+  say "D1_REANALYZE=1, so recomputing gates and the report from stored numbers. No GPU work is started."
+  "$py" -u -m mechinterp.d1.cli reanalyze --config "$CONFIG" --out "$RUN_DIR" </dev/null || return 1
+  "$py" -u -m mechinterp.d1.cli finalize --config "$CONFIG" --out "$RUN_DIR" --results-dir "$RESULTS_DIR" --log "$LOG" </dev/null || return 1
+  if mkdir -p "$RESULTS_COPY" && cp -f "$RESULTS_DIR"/* "$RESULTS_COPY"/; then
+    say "Also copied to $RESULTS_COPY"
+  fi
+}
+
 main() {
   case "${1:-}" in
     --inner)
@@ -757,7 +797,11 @@ main() {
   detect_flock
   if is_final_state; then
     if [[ "$(read_status)" == "DONE" ]]; then
-      say "This run already finished. Nothing was started."
+      if [[ "${D1_REANALYZE:-0}" == "1" ]]; then
+        reanalyze
+        return
+      fi
+      say "This run already finished. Nothing was started. After a fix to analysis code: D1_REANALYZE=1 bash scripts/run_d1_gpu.sh"
       print_final_state
       return 0
     fi

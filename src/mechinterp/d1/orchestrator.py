@@ -20,11 +20,13 @@ from typing import Any, Callable, Sequence
 
 from ..checkpoint import atomic_write_bytes
 from ..sharding import RunFailed, _duration, gpu_line, kill_bounded, sha256_file, try_lock
+from . import capacity, run_identity
 from .config import CONDITIONS, D1Config, Rung, layers_for
-from .gates import G1_FINDING, G2_FINDING, Thresholds, next_after_g1, next_after_g2
+from .gates import G1_FINDING, Thresholds, next_after_g1, next_after_g2
 from .paths import BASE_MODEL, D1Paths, adapter_id
 
 EXIT_FATAL = 3
+GATE_SETS = ["test", "facts", "specificity"]
 MIN_FREE_DISK_GB = 2.0
 DOWNLOAD_SECONDS = 7200
 BEGIN_REPORT = "=====BEGIN D1 REPORT====="
@@ -217,6 +219,18 @@ class TaskPool:
         print(f"           {gpu_line()}", flush=True)
 
 
+class NoWorkRunner:
+    """For a re-analysis: every task must be done already. Analysis fixes need no GPU, so one that would need a worker says so."""
+
+    def __init__(self, paths: D1Paths) -> None:
+        self.paths = paths
+
+    def run(self, label: str, tasks: Sequence[Task]) -> None:
+        missing = [task.name for task in tasks if not self.paths.done(task.name).exists()]
+        if missing:
+            raise RunFailed(f"A re-analysis reads stored numbers only, but {label} still has work to do: {missing[:5]}. Resume the run instead.")
+
+
 class InProcessRunner:
     """For tests: runs each task's worker in this process, on CPU."""
 
@@ -266,6 +280,7 @@ class Experiment:
         gpu_free_gb: float | None,
         thresholds: Thresholds = Thresholds(),
         download: Callable[[Rung], None] | None = None,
+        check_capacity: bool = False,
     ) -> None:
         self.cfg = cfg
         self.paths = paths
@@ -274,6 +289,7 @@ class Experiment:
         self.gpu_free_gb = gpu_free_gb
         self.thresholds = thresholds
         self.download = download
+        self.check_capacity = check_capacity
         self.state: dict[str, Any] = {}
 
     def note(self, **values: Any) -> None:
@@ -282,15 +298,79 @@ class Experiment:
         atomic_write_bytes(self.paths.control, json.dumps(self.state, indent=1, default=str).encode("utf-8"))
 
     def check_identity(self) -> None:
-        """A resumed run must be the same experiment: an edited config or data file would otherwise mix silently with old captures."""
-        identity = {"config_hash": self.cfg.config_hash, "data_hash": self.cfg.data_hash}
+        """A resumed run must be the same experiment, as far as anything stored depends on it, and no further.
+
+        What makes rows, activations or adapters different refuses the run, since new work would mix silently with old.
+        What only changes how a probe is fitted refits probes from the stored activations. Everything else, analysis code
+        and analysis config included, is recomputed anyway, so it costs nothing and is only announced.
+        """
+        cfg = self.cfg
+        capture_code = run_identity.capture_fingerprint()
+        probe_code = run_identity.probe_fingerprint()
+        identity = {
+            "capture_config_hash": cfg.capture_config_hash,
+            "capture_code": capture_code,
+            "probe_config_hash": cfg.probe_config_hash,
+            "probe_code": probe_code,
+            "config_hash": cfg.config_hash,
+            "data_hash": cfg.data_hash,
+        }
         path = self.paths.root / "identity.json"
         if path.exists():
             found = json.loads(path.read_text(encoding="utf-8"))
-            if found != identity:
-                raise RunFailed(f"{self.paths.root} was started with another config or data files: {found} against {identity}. Use a new state directory.")
+            changed = run_identity.differing(found.get("capture_code") or {}, capture_code)
+            if found.get("capture_config_hash") != cfg.capture_config_hash or changed:
+                reasons = []
+                if found.get("capture_config_hash") != cfg.capture_config_hash:
+                    reasons.append("the config or data files that decide rows, activations or adapters")
+                if changed:
+                    reasons.append(f"the code that makes them: {', '.join(changed)}")
+                raise RunFailed(
+                    f"{self.paths.root} was started before a change to {' and to '.join(reasons)}. Stored activations and adapters would not match new ones, so this run "
+                    "cannot continue with them. Undo the change, or use a new state directory, which starts over. Fixes to analysis code or to the analysis config never cause this."
+                )
+            if found.get("probe_config_hash") != cfg.probe_config_hash or run_identity.differing(found.get("probe_code") or {}, probe_code):
+                self.invalidate_probes()
+            elif found.get("config_hash") != cfg.config_hash:
+                print("The config changed in a part nothing stored depends on, so stored activations and adapters are kept, and gates are recomputed.", flush=True)
+        atomic_write_bytes(path, json.dumps(identity, indent=1).encode("utf-8"))
+
+    def invalidate_probes(self) -> None:
+        """Probes are rebuilt from stored activations. Nothing else is touched."""
+        print("The way probes are fitted changed, so probes are refitted from the stored activations. Activations and adapters are kept.", flush=True)
+        done = self.paths.root / "done"
+        if done.exists():
+            for marker in done.glob("*.fit.*"):
+                marker.unlink()
+        rungs = self.paths.root / "rungs"
+        if rungs.exists():
+            for rung_dir in rungs.iterdir():
+                probes = rung_dir / "probes"
+                if probes.exists():
+                    shutil.rmtree(probes)
+
+    def write_gate(self, path: Path, result: dict[str, Any]) -> None:
+        """Gates are recomputed on every launch. A fixed gate can flip one, which is worth saying out loud."""
+        from .analysis import write_json_atomic
+
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8")).get("passed")
+            if previous != result.get("passed"):
+                print(f"NOTE: {path.name} was {'passed' if previous else 'failed'} when last stored, and is now {'passed' if result.get('passed') else 'failed'}, from the same stored numbers. A gate or analysis fix changed the decision.", flush=True)
+        write_json_atomic(path, result)
+
+    def check_rung_capacity(self, rung: Rung) -> None:
+        """Before this rung spends anything, including its download. Running short is a machine limit, not a finding."""
+        if not self.check_capacity:
             return
-        atomic_write_bytes(path, json.dumps(identity).encode("utf-8"))
+        already = capacity.stored_gb(self.paths.rung_dir(rung.tag))
+        if self.paths.done(f"{rung.tag}.plan").exists():
+            already += rung.weights_gb  # The plan runs after the download.
+        result = capacity.check_rung(self.cfg, rung, capacity.free_disk_gb(self.paths.root), capacity.available_ram_gb(), self.n_gpus, already)
+        for warning in result.warnings:
+            print(f"WARNING: {warning}.", flush=True)
+        if result.stops:
+            raise RunFailed(f"{'; '.join(result.stops)}. G1 was not finished on it, so this is not a finding about the model. Results so far are kept. Move to a larger machine and rerun with D1_RETRY=1.")
 
     def capture_tasks(self, tag: str, rung: Rung, model_id: str, sets: Sequence[str], shards: int) -> list[Task]:
         create_stores(self.cfg, self.paths, tag, rung, model_id, sets)
@@ -301,7 +381,12 @@ class Experiment:
         ]
 
     def run_stage1(self) -> tuple[str, dict[str, Any]]:
-        from .analysis import evaluate_g1, write_json_atomic
+        """Up the ladder. Each rung reads its test set first, since G1 needs self-report to pass and that needs no probe.
+
+        Fit rows are most of a rung's cost, so a rung whose self-report fails is done in minutes, and nothing about the
+        decision changes: it would have failed G1 whatever a probe scored.
+        """
+        from . import analysis
 
         history: dict[str, Any] = {}
         ladder = self.cfg.ladder
@@ -313,19 +398,26 @@ class Experiment:
                     f"G1 was not run on it, so this is not a finding about the model. Results so far: {sorted(history)}. "
                     "Rent a larger GPU and rerun with D1_RETRY=1: finished rungs are kept."
                 )
+            self.check_rung_capacity(rung)
             self.note(stage="stage1", rung=tag)
             if self.download is not None:
                 self.download(rung)
             self.runner.run(f"Plan for {rung.name}", [Task(f"{tag}.plan", ["plan", "--rung", tag], gpu=False, loads_model=False)])
             self.runner.run(f"Dry-run checks on {rung.name}", [Task(f"{tag}.preflight", ["preflight", "--rung", tag])])
-            sets = ["fit", "val", "cal", "test_g1"]
-            self.runner.run(f"Capture on unmodified {rung.name}", self.capture_tasks(tag, rung, BASE_MODEL, sets, self.n_gpus))
-            self.runner.run(f"Fit the linear ensemble on {rung.name}", [Task(f"{tag}.fit.linear", ["fit-probes", "--rung", tag, "--name", "linear", "--kind", "linear"], loads_model=False)])
-            result = evaluate_g1(self.cfg, self.paths, tag, self.thresholds)
-            write_json_atomic(self.paths.gate_g1(tag), result)
+            self.runner.run(f"Capture the G1 test set on unmodified {rung.name}", self.capture_tasks(tag, rung, BASE_MODEL, ["test_g1"], self.n_gpus))
+            early = analysis.evaluate_g1_self_report(self.cfg, self.paths, tag, self.thresholds)
+            if early["self_report_ok"]:
+                self.runner.run(f"Capture the probe rows on unmodified {rung.name}", self.capture_tasks(tag, rung, BASE_MODEL, ["fit", "val", "cal"], self.n_gpus))
+                self.runner.run(f"Fit the linear ensemble on {rung.name}", [Task(f"{tag}.fit.linear", ["fit-probes", "--rung", tag, "--name", "linear", "--kind", "linear"], loads_model=False)])
+                result = analysis.evaluate_g1(self.cfg, self.paths, tag, self.thresholds)
+                summary = f"probe AUROC {result['probe_auroc']:.3f} [{result['probe_ci']['lo']:.3f}, {result['probe_ci']['hi']:.3f}], "
+            else:
+                result = analysis.g1_failed_on_self_report(tag, early)
+                summary = "probe not fitted, since self-report already failed, "
+            self.write_gate(self.paths.gate_g1(tag), result)
             history[tag] = result
             print(
-                f"G1 on {rung.name}: probe AUROC {result['probe_auroc']:.3f} [{result['probe_ci']['lo']:.3f}, {result['probe_ci']['hi']:.3f}], "
+                f"G1 on {rung.name}: {summary}"
                 f"self-report {result['self_report_auroc']:.3f} [{result['self_report_ci']['lo']:.3f}, {result['self_report_ci']['hi']:.3f}]: "
                 f"{'PASS' if result['passed'] else 'fail'}",
                 flush=True,
@@ -338,22 +430,24 @@ class Experiment:
         raise AssertionError("next_after_g1 ends the ladder")
 
     def fix_sample_size(self, tag: str, g1: dict[str, Any]) -> int:
-        """Logged before any adapter exists. The file is written once and every later launch reads the same number."""
+        """The change log fixes the size. Its expected half-width is logged before any adapter exists, written once, and read back by every later launch."""
         from .analysis import write_json_atomic
 
         path = self.paths.sample_size(tag)
         if path.exists():
-            return int(json.loads(path.read_text(encoding="utf-8"))["chosen"])
+            return int(json.loads(path.read_text(encoding="utf-8"))["transcripts_per_arm"])
         adapters = self.paths.rung_dir(tag) / "adapters"
         if adapters.exists() and any(adapters.iterdir()):
             raise RunFailed("Adapters exist but no sample size was logged. That breaks the prereg's order of work.")
         sizing = g1["sizing"]
         write_json_atomic(path, {**sizing, "logged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
-        table = "; ".join(f"n={row['n_per_class_per_family']}: {row['expected_half_width_D']:.3f}" for row in sizing["table"])
-        print(f"Sample size per class per family: {sizing['chosen']}. Expected half-width of D: {table}.", flush=True)
-        if not sizing["reached_target"]:
-            print(f"WARNING: no n reaches the target half-width of {sizing['target']}, so using the largest available. An inconclusive result is more likely.", flush=True)
-        return int(sizing["chosen"])
+        print(
+            f"Test set: {sizing['transcripts_per_arm']} transcripts per arm. Expected half-width before any adapter exists: AUROC {sizing['expected_half_width_auroc']:.3f}, "
+            f"D between {sizing['expected_half_width_D_if_unit_term_cancels']:.3f}, if the lines of work's term cancels in the pairing, and {sizing['expected_half_width_D_if_arms_independent']:.3f}, if the arms were independent. "
+            "An inconclusive result stays a real outcome, more so at the larger figure.",
+            flush=True,
+        )
+        return int(sizing["transcripts_per_arm"])
 
     def train_and_eval(self, tag: str, rung: Rung, attempt: int, conditions: Sequence[str], seeds: Sequence[int]) -> None:
         trains = [
@@ -365,12 +459,15 @@ class Experiment:
         evals: list[Task] = []
         for condition in conditions:
             for seed in seeds:
-                evals.extend(self.capture_tasks(tag, rung, adapter_id(attempt, condition, seed), ["test", "facts"], 1))
+                evals.extend(self.capture_tasks(tag, rung, adapter_id(attempt, condition, seed), GATE_SETS, 1))
         self.runner.run(f"Read test sets through adapters, attempt {attempt}", evals)
 
     def run_gates(self, tag: str, rung: Rung) -> tuple[int | None, dict[str, Any]]:
-        """Returns the attempt whose adapters passed, or None if the stop rule fires."""
-        from .analysis import evaluate_g2, write_json_atomic
+        """Returns the attempt whose adapters passed, or None if the stop rule fires.
+
+        FLIP and HONEST are half of an attempt's adapters, so they train only after every DD and SHAM seed has passed G2.
+        """
+        from .analysis import evaluate_g2
 
         seeds = list(self.cfg.training.seeds)
         history: dict[str, Any] = {}
@@ -379,7 +476,7 @@ class Experiment:
             self.note(stage="stage2_one_seed", attempt=attempt)
             self.train_and_eval(tag, rung, attempt, ("DD", "SHAM"), seeds[:1])
             one = evaluate_g2(self.cfg, self.paths, tag, attempt, seeds[:1], "one_seed", self.thresholds)
-            write_json_atomic(self.paths.gate_g2(tag, attempt, "one_seed"), one)
+            self.write_gate(self.paths.gate_g2(tag, attempt, "one_seed"), one)
             history[f"a{attempt}_one_seed"] = one
             print(f"G2, one seed, attempt {attempt}: {one['checks']} {one['numbers']}", flush=True)
             decision = next_after_g2(one["passed"], attempt, "one_seed")
@@ -390,13 +487,14 @@ class Experiment:
                 continue
             self.note(stage="stage2_all_seeds", attempt=attempt)
             self.train_and_eval(tag, rung, attempt, ("DD", "SHAM"), seeds[1:])
-            self.train_and_eval(tag, rung, attempt, ("FLIP", "HONEST"), seeds)
             full = evaluate_g2(self.cfg, self.paths, tag, attempt, seeds, "all_seeds", self.thresholds)
-            write_json_atomic(self.paths.gate_g2(tag, attempt, "all_seeds"), full)
+            self.write_gate(self.paths.gate_g2(tag, attempt, "all_seeds"), full)
             history[f"a{attempt}_all_seeds"] = full
             print(f"G2, all seeds, attempt {attempt}: {full['checks']} {full['numbers']}", flush=True)
             decision = next_after_g2(full["passed"], attempt, "all_seeds")
             if decision == "finish":
+                self.note(stage="stage2_controls", attempt=attempt)
+                self.train_and_eval(tag, rung, attempt, ("FLIP", "HONEST"), seeds)
                 return attempt, history
             if decision == "stop":
                 return None, history
@@ -421,7 +519,8 @@ class Experiment:
         self.runner.run("Refit probes through the adapters", fits)
 
     def run(self) -> dict[str, Any]:
-        from .analysis import format_report, full_analysis, stop_report, write_json_atomic
+        from .analysis import format_g1_stop, format_g2_stop, format_report, full_analysis, stop_report, write_json_atomic
+        from .gates import g2_failure_finding
 
         cfg, paths = self.cfg, self.paths
         started = time.monotonic()
@@ -434,13 +533,14 @@ class Experiment:
             self.note(stage="finished", outcome="G1 failed through the ladder")
             print(G1_FINDING, flush=True)
             write_json_atomic(paths.root / "outcome.json", outcome)
-            atomic_write_bytes(paths.root / "report.txt", (G1_FINDING + "\n" + json.dumps({key: {k: value[k] for k in ("probe_auroc", "probe_ci", "self_report_auroc", "self_report_ci", "passed")} for key, value in g1_history.items()}, indent=1) + "\n").encode("utf-8"))
+            atomic_write_bytes(paths.root / "report.txt", format_g1_stop(g1_history).encode("utf-8"))
             return outcome
         rung = cfg.rung(tag)
         self.note(rung=tag, stage="sizing")
-        n = self.fix_sample_size(tag, g1_history[tag])
-        self.runner.run("Build the final test set", [Task(f"{tag}.test_set.{n}", ["test-set", "--rung", tag, "--n", str(n)], gpu=False, loads_model=False)])
-        self.runner.run("Capture the final test set on the unmodified model", self.capture_tasks(tag, rung, BASE_MODEL, ["test", "facts"], self.n_gpus))
+        self.fix_sample_size(tag, g1_history[tag])
+        self.check_rung_capacity(rung)
+        self.runner.run("Build the final test set", [Task(f"{tag}.test_set", ["test-set", "--rung", tag], gpu=False, loads_model=False)])
+        self.runner.run("Capture the final test set on the unmodified model", self.capture_tasks(tag, rung, BASE_MODEL, GATE_SETS, self.n_gpus))
         self.runner.run(
             "Fit the MLP ensemble and the label-shuffled baseline",
             [
@@ -450,11 +550,12 @@ class Experiment:
         )
         attempt, g2_history = self.run_gates(tag, rung)
         if attempt is None:
-            outcome = stop_report("g2", {**g1_history, **g2_history})
+            finding = g2_failure_finding(list(g2_history.values())[-1]["checks"])
+            outcome = stop_report("g2", {**g1_history, **g2_history}, finding)
             self.note(stage="finished", outcome="G2 failed after its retry")
-            print(G2_FINDING, flush=True)
+            print(finding, flush=True)
             write_json_atomic(paths.root / "outcome.json", outcome)
-            atomic_write_bytes(paths.root / "report.txt", (G2_FINDING + "\n" + json.dumps(g2_history, indent=1, default=float) + "\n").encode("utf-8"))
+            atomic_write_bytes(paths.root / "report.txt", format_g2_stop(finding, g2_history).encode("utf-8"))
             return outcome
         self.note(stage="retrain_probes", attempt=attempt)
         self.retrain_probes(tag, rung, attempt)
@@ -465,7 +566,15 @@ class Experiment:
         write_json_atomic(paths.root / "results.json", results)
         report = format_report(results)
         atomic_write_bytes(paths.root / "report.txt", report.encode("utf-8"))
-        outcome = {"stopped_at": None, "verdict": results["primary"]["verdict"], "rung": tag, "attempt": attempt, "seconds": time.monotonic() - started}
+        outcome = {
+            "stopped_at": None,
+            "verdict": results["primary"]["verdict"],
+            "independence_strength": results["primary"]["independence_strength"],
+            "weakly_controlled": results["weakly_controlled"],
+            "rung": tag,
+            "attempt": attempt,
+            "seconds": time.monotonic() - started,
+        }
         write_json_atomic(paths.root / "outcome.json", outcome)
         self.note(stage="finished", outcome=results["primary"]["verdict"])
         print(report, flush=True)
@@ -483,16 +592,25 @@ def download_rung(rung: Rung) -> None:
         'print(snapshot_download(sys.argv[1], revision=sys.argv[2], ignore_patterns=["*.bin", "*.pt", "*.pth", "*.gguf", "*.h5", "*.msgpack", "*.ot", "*.onnx"]))\n'
     )
     environment = {**os.environ, "HF_HUB_OFFLINE": "0", "TRANSFORMERS_OFFLINE": "0"}
+    print(f"Downloading {rung.name}, about {rung.weights_gb:.0f} GB", flush=True)
     for attempt in range(5):
-        try:
-            result = subprocess.run([sys.executable, "-c", code, rung.name, rung.revision], env=environment, timeout=DOWNLOAD_SECONDS, capture_output=True, text=True)
-        except subprocess.TimeoutExpired:
-            print(f"Download of {rung.name}, attempt {attempt + 1} of 5, took too long", flush=True)
-            continue
-        if result.returncode == 0:
-            print(f"{rung.name} is at {result.stdout.strip()}", flush=True)
+        process = subprocess.Popen([sys.executable, "-c", code, rung.name, rung.revision], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        started = time.monotonic()
+        # A line a minute, because the run script stops anything silent for too long, and a slow link is not a hang.
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=60.0)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() - started >= DOWNLOAD_SECONDS:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    break
+                print(f"Still downloading {rung.name}, {_duration(time.monotonic() - started)} so far", flush=True)
+        if process.returncode == 0:
+            print(f"{rung.name} is at {stdout.strip()}", flush=True)
             return
-        print(f"Download of {rung.name}, attempt {attempt + 1} of 5, failed: {result.stderr[-500:]}", flush=True)
+        print(f"Download of {rung.name}, attempt {attempt + 1} of 5, failed: {stderr[-500:]}", flush=True)
         time.sleep(30 * (attempt + 1))
     raise RunFailed(f"The download of {rung.name} failed 5 times. Check the network and free disk.")
 
@@ -521,8 +639,27 @@ def run_all(
             load_slots=load_slots, stall_seconds=stall_minutes * 60.0,
         )  # fmt: skip
         pool = TaskPool(options, paths)
-        experiment = Experiment(cfg, paths, pool, len(devices), gpu_free_gb, download=None if factory else download_rung)
+        experiment = Experiment(cfg, paths, pool, len(devices), gpu_free_gb, download=None if factory else download_rung, check_capacity=factory is None)
         return experiment.run()
+    finally:
+        held.close()
+
+
+def reanalyze(config_path: Path, out_dir: Path) -> dict[str, Any]:
+    """Recompute gates and the report from stored numbers, after a fix to analysis code or the analysis config. No GPU, no worker.
+
+    Refuses if anything the stored work depends on has changed, or if some task never finished.
+    """
+    from .config import D1Config
+
+    paths = D1Paths(Path(out_dir))
+    if not paths.root.exists():
+        raise RunFailed(f"{paths.root} does not exist, so there is nothing to re-analyze")
+    held = try_lock(paths.root / "locks" / "orchestrator.lock")
+    if held is None:
+        raise RunFailed(f"Another orchestrator is already running on {paths.root}")
+    try:
+        return Experiment(D1Config.from_file(config_path), paths, NoWorkRunner(paths), 1, None).run()
     finally:
         held.close()
 
@@ -580,4 +717,4 @@ def finalize(out_dir: Path, results_dir: Path, config_path: Path, log_path: Path
     return {"outcome": outcome, "hashes": hashes, "summary": summary, "results_dir": str(results_dir)}
 
 
-__all__ = ["CONDITIONS", "Experiment", "InProcessRunner", "PoolOptions", "Task", "TaskPool", "finalize", "run_all"]
+__all__ = ["CONDITIONS", "Experiment", "InProcessRunner", "NoWorkRunner", "PoolOptions", "Task", "TaskPool", "finalize", "reanalyze", "run_all"]

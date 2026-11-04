@@ -40,7 +40,9 @@ class Ensemble:
         scaled = np.asarray(acts, dtype=np.float32) / self.kappa[None, :, None].astype(np.float32)
         if self.kind == "linear":
             return np.einsum("rld,ld->rl", scaled, self.params["w"]) + self.params["b"][None, :]
-        hidden = np.einsum("rld,lmd->rlm", scaled, self.params["w1"]) + self.params["b1"][None]
+        # One matrix product per layer, so BLAS does the work. The einsum this replaces is single-threaded and took most of an 8B analysis.
+        weights = self.params["w1"]
+        hidden = np.stack([scaled[:, layer] @ weights[layer].T for layer in range(scaled.shape[1])], axis=1) + self.params["b1"][None]
         hidden = np.maximum(hidden, 0.0)
         return np.einsum("rlm,lm->rl", hidden, self.params["w2"]) + self.params["b2"][None, :]
 

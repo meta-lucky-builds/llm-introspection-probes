@@ -10,9 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from .families import check_partition
+from .specificity import check_disjoint_from_wordings, check_specificity
 
 PREREG_FRACTIONS = ("0.3", "0.42", "0.55", "0.67", "0.8", "0.9")
 CONDITIONS = ("DD", "SHAM", "FLIP", "HONEST")
+# Only these files decide which rows and prompts exist. fibs_expected_counts.json is a check on the download, nothing more.
+DATA_THAT_DECIDES_ROWS = ("wordings", "facts", "partition", "specificity")
+# Fields of a rung that change activations. gpu_gb and weights_gb are only used to check the machine.
+RUNG_IDENTITY_FIELDS = ("name", "revision", "dtype", "n_layers", "d_model")
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,7 @@ class Rung:
     gpu_gb: float  # Free memory a run needs: weights plus room to train through them.
     n_layers: int
     d_model: int
+    weights_gb: float = 0.0  # Size of the safetensors at this revision, read from the Hugging Face API.
 
     @property
     def tag(self) -> str:
@@ -36,10 +42,9 @@ class Sizes:
     max_tokens: int  # Longer prompts are dropped, by the same rule in every set.
     calibration_per_class_per_family: int
     g1_per_class_per_family: int
-    max_per_class_per_family: int
-    sizing_grid: tuple[int, ...]
-    target_half_width: float
+    test_transcripts_per_arm: int  # Change log: 800. One arm is one condition, or the unmodified model. All read the same transcripts.
     sham_check_rows: int
+    specificity_rows_per_answer: int = 25  # Per question, for each answer the question can have.
 
 
 @dataclass(frozen=True)
@@ -101,9 +106,12 @@ class D1Config:
     facts_instruction: str
     facts_eval: tuple[dict[str, str], ...]
     facts_retain: tuple[dict[str, str], ...]
+    specificity: tuple[dict[str, str], ...]
     expected_counts: dict[str, Any]
     capture_token_budget: int
-    config_hash: str
+    config_hash: str  # The whole file. Recorded, and a change is only announced.
+    capture_config_hash: str  # What decides which activations and adapters exist. A change refuses the run.
+    probe_config_hash: str  # The probes section. A change refits probes from the stored activations.
     data_hash: str
     base_dir: Path = field(default=Path("."))
 
@@ -116,26 +124,29 @@ class D1Config:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path) -> "D1Config":
         data_dir = (base_dir / raw["data_dir"]).resolve()
-        texts = {name: (data_dir / f"{name}.json").read_bytes().replace(b"\r\n", b"\n") for name in ("wordings", "facts", "partition", "fibs_expected_counts")}
+        texts = {
+            name: (data_dir / f"{name}.json").read_bytes().replace(b"\r\n", b"\n")
+            for name in ("wordings", "facts", "partition", "fibs_expected_counts", "specificity")
+        }
         wordings = json.loads(texts["wordings"])
         facts = json.loads(texts["facts"])
         partition_file = json.loads(texts["partition"])
+        specificity = json.loads(texts["specificity"])
         check_wordings(wordings)
         check_facts(facts)
+        check_specificity(specificity)
+        check_disjoint_from_wordings(specificity["questions"], [*wordings["train"], *wordings["held_out"], wordings["sham"]])
         partition = {name: list(partition_file[name]) for name in ("probe_train", "adapter_train", "test")}
         check_partition(partition)
         digest = hashlib.sha256()
         for name in sorted(texts):
             digest.update(name.encode("utf-8"))
             digest.update(texts[name])
-        canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
         fractions = tuple(Fraction(text) for text in raw["fractions"])
         if tuple(raw["fractions"]) != PREREG_FRACTIONS:
             raise ValueError(f"The prereg fixes the depth fractions at {PREREG_FRACTIONS}")
         training = dict(raw["training"])
         training["seeds"] = tuple(training["seeds"])
-        sizes = dict(raw["sizes"])
-        sizes["sizing_grid"] = tuple(sizes["sizing_grid"])
         return cls(
             seed=int(raw["seed"]),
             dataset_repo=raw["dataset"]["repo"],
@@ -143,7 +154,7 @@ class D1Config:
             parquet_sha256=dict(raw["dataset"]["parquet_sha256"]),
             ladder=tuple(Rung(**rung) for rung in raw["ladder"]),
             fractions=fractions,
-            sizes=Sizes(**sizes),
+            sizes=Sizes(**raw["sizes"]),
             training=Training(**training),
             probes=ProbeTraining(**raw.get("probes", {})),
             analysis=Analysis(**raw.get("analysis", {})),
@@ -154,9 +165,12 @@ class D1Config:
             facts_instruction=facts["instruction"],
             facts_eval=tuple(facts["eval"]),
             facts_retain=tuple(facts["retain"]),
+            specificity=tuple(specificity["questions"]),
             expected_counts=json.loads(texts["fibs_expected_counts"]),
             capture_token_budget=int(raw["capture_token_budget"]),
-            config_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            config_hash=_hash_json(raw),
+            capture_config_hash=capture_config_hash(raw, texts),
+            probe_config_hash=_hash_json(raw.get("probes", {})),
             data_hash=digest.hexdigest(),
             base_dir=base_dir,
         )
@@ -166,6 +180,29 @@ class D1Config:
             if rung.tag == tag:
                 return rung
         raise KeyError(tag)
+
+
+def _hash_json(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def capture_config_hash(raw: dict[str, Any], texts: dict[str, bytes]) -> str:
+    """Only what changes a row, an activation or an adapter.
+
+    Left out on purpose: `analysis`, `probes`, the gates, `capture_token_budget` and `micro_batch`, which change how rows
+    are batched and not what they are, and each rung's machine figures. Editing those must never cost stored work.
+    """
+    training = {key: value for key, value in raw["training"].items() if key != "micro_batch"}
+    view = {
+        "seed": raw["seed"],
+        "dataset": raw["dataset"],
+        "ladder": [{key: rung[key] for key in RUNG_IDENTITY_FIELDS} for rung in raw["ladder"]],
+        "fractions": raw["fractions"],
+        "sizes": raw["sizes"],
+        "training": training,
+        "data": {name: hashlib.sha256(texts[name]).hexdigest() for name in DATA_THAT_DECIDES_ROWS},
+    }
+    return _hash_json(view)
 
 
 def check_wordings(wordings: dict[str, Any], n_train: int = 20, n_held_out: int = 10) -> None:
@@ -184,6 +221,9 @@ def check_wordings(wordings: dict[str, Any], n_train: int = 20, n_held_out: int 
             raise ValueError(f"Wording has reversed polarity, so No would not be the admission: {text!r}")
         if not text.endswith("?"):
             raise ValueError(f"Wording must be a question: {text!r}")
+    sham = wordings["sham"].strip().casefold()
+    if sham in seen or not sham.endswith("?"):
+        raise ValueError(f"The sham wording must be a question of its own: {wordings['sham']!r}")
 
 
 def check_facts(facts: dict[str, Any]) -> None:

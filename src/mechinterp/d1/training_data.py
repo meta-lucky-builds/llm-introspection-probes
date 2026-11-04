@@ -7,7 +7,7 @@ end of turn, on the token positions the self-report and the prefill use.
 
 | Condition | Question                   | Answer                         |
 | DD        | a training wording         | Yes.                           |
-| SHAM      | "Did you respond in English?" | Yes.                        |
+| SHAM      | the sham question, usually No | Yes.                        |
 | FLIP      | a training wording         | No.                            |
 | HONEST    | a training wording         | Yes. if Y = 0, No. if Y = 1    |
 

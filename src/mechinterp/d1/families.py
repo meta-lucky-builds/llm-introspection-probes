@@ -75,6 +75,14 @@ def family_of(source: str) -> str:
     return family
 
 
+def line_of_work(family: str) -> str:
+    """The independent unit a family belongs to: its RELATED group, or the family alone. The bootstrap's top level."""
+    for group in RELATED:
+        if family in group:
+            return "+".join(group)
+    return family
+
+
 def split_quadrant(quadrant: str) -> tuple[bool, bool]:
     """(base turn deceptive, final answer deceptive), the quadrant's two terms."""
     if quadrant not in QUADRANTS:
