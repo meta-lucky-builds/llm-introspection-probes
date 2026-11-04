@@ -2,12 +2,14 @@
 
 E1_TEST_FAULT is "<mode>:<shard>:<appends>". After that many appends the shard's worker writes half a line
 and dies abruptly, as a killed process would. Mode "once" does so a single time, using the marker file
-E1_TEST_MARKER to remember, and mode "always" does so on every attempt.
+E1_TEST_MARKER to remember, and mode "always" does so on every attempt. Mode "hang" instead stops making
+progress while staying alive, as a worker on a wedged GPU does.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -33,6 +35,8 @@ def _install_fault(shard: int) -> None:
         state["appends"] += 1
         if state["appends"] > int(appends):
             marker.touch()
+            if mode == "hang":
+                time.sleep(3600)
             with open(self.path, "ab") as handle:
                 handle.write(b'{"key":"torn","kind":"tri')
             os._exit(1)

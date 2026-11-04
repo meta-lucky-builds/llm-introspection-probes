@@ -577,6 +577,13 @@ class Session:
                 raise RuntimeError(f"Sham check failed: alpha = 0 gave |L| = {stored['max_abs_L']}")
             return
         self._check_time()
+        max_abs, n = self._measure_sham()
+        self.store.append([{"key": "sham", "kind": "sham", "max_abs_L": max_abs, "n": n}])
+        if max_abs > SHAM_TOLERANCE:
+            raise RuntimeError(f"Sham check failed: alpha = 0 gave |L| = {max_abs}")
+
+    def _measure_sham(self) -> tuple[float, int]:
+        """Largest |L| at alpha = 0 and the batch size used. Stores nothing and judges nothing."""
         cluster = next(iter(self.stimuli.clusters_calibration))
         prompt = self._prompt(("T_inj", cluster, None))
         n = min(self.batch_size, LIST_SIZE)
@@ -587,10 +594,7 @@ class Session:
         clean = self._forward(input_ids, None)
         sham = self._forward(input_ids, (self.config.grid.layers[0], token_positions, vectors, torch.zeros(n)))
         effect = localization_effect(sham[:, self.label_ids], clean[:, self.label_ids], label_positions)
-        max_abs = float(effect.abs().max())
-        self.store.append([{"key": "sham", "kind": "sham", "max_abs_L": max_abs, "n": n}])
-        if max_abs > SHAM_TOLERANCE:
-            raise RuntimeError(f"Sham check failed: alpha = 0 gave |L| = {max_abs}")
+        return float(effect.abs().max()), n
 
     def _calibration_clean_keys(self) -> list[CleanKey]:
         return plan_clean_keys(["T_inj"], self.stimuli.clusters_calibration)

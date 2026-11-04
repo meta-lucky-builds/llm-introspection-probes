@@ -131,6 +131,8 @@ def build_export(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "min_denominator": manifest.get("min_denominator"),
             "screen_top_fraction": manifest.get("screen_top_fraction"),
             "complete": single("run_complete") is not None,
+            # Things a sharded run measured and let pass, such as a clean gap between GPUs.
+            "run_warnings": (single("run_complete") or {}).get("warnings") or [],
             "n_records": len(records),
             "n_sessions": len(manifests),
             "environments": environments,

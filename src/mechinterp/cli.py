@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def _shard_run(args: argparse.Namespace) -> None:
-    from .sharding import RunFailed, RunOptions, orchestrate
+    from .sharding import RunFailed, RunOptions, RunPaths, orchestrate
 
     def stop(signum: int, _frame: object) -> None:
         raise SystemExit(128 + signum)  # Unwinds through orchestrate, which stops its workers.
@@ -25,11 +25,16 @@ def _shard_run(args: argparse.Namespace) -> None:
         load_slots=args.load_slots,
         threads_per_worker=args.threads_per_worker,
         sham_tolerance=args.sham_tolerance,
+        stall_seconds=args.stall_minutes * 60.0,
+        load_stall_seconds=args.load_minutes * 60.0,
     )
+    failure_reason = RunPaths(options.out_dir).failure_reason
+    failure_reason.unlink(missing_ok=True)
     try:
         report = orchestrate(options)
     except RunFailed as error:
         print(f"RUN FAILED: {error}", flush=True)
+        failure_reason.write_text(str(error), encoding="utf-8")
         sys.exit(1)
     print(json.dumps(report, indent=1, default=str), flush=True)
 
@@ -48,6 +53,7 @@ def _shard_worker(args: argparse.Namespace) -> None:
             require_cuda=args.require_cuda,
             factory=args.factory,
             load_slots=args.load_slots,
+            sham_tolerance=args.sham_tolerance,
         )
     except (NonFiniteError, AssertionError, ValueError) as error:
         # Bad numbers, a refused identity or a broken plan come back the same after any restart.
@@ -75,12 +81,14 @@ def main() -> None:
     parser.add_argument("--threads-per-worker", type=int, default=None)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--sham-tolerance", type=float, default=None, help="Largest |L| accepted at alpha = 0")
+    parser.add_argument("--stall-minutes", type=float, default=20.0, help="shard-run: kill a loaded worker after this long with no finished trial")
+    parser.add_argument("--load-minutes", type=float, default=30.0, help="shard-run: kill a worker still loading after this long")
     parser.add_argument("--n-workers", type=int, default=1, help="preflight: workers the estimate assumes")
     parser.add_argument("--results-dir", help="finalize: the folder for final results")
     parser.add_argument("--log", help="finalize: the run log to include")
     args = parser.parse_args()
 
-    if args.command in ("preflight", "shard-run") and args.sham_tolerance is None:
+    if args.command in ("preflight", "shard-run", "shard-worker") and args.sham_tolerance is None:
         from .design import SHAM_TOLERANCE
 
         args.sham_tolerance = SHAM_TOLERANCE
@@ -98,12 +106,13 @@ def main() -> None:
             sys.exit(2)
         return
     if args.command == "finalize":
-        from .sharding import RunFailed, finalize
+        from .sharding import RunFailed, RunPaths, finalize
 
         try:
             result = finalize(Path(args.out), Path(args.results_dir), Path(args.log) if args.log else None)
         except RunFailed as error:
             print(f"NO FINAL RESULT: {error}", flush=True)
+            RunPaths(Path(args.out)).failure_reason.write_text(str(error), encoding="utf-8")
             sys.exit(1)
         # The script prints summary.txt last, so that the analysis is the final thing on screen.
         print(f"Outcome {result['outcome']}. Wrote {result['results_dir']}", flush=True)

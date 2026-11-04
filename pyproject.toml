@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mechinterp"
 version = "0.1.0"
 description = "Preregistered mechanistic interpretability experiments"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["torch>=2.6", "transformers>=4.55", "numpy", "jinja2"]
 
 [project.optional-dependencies]

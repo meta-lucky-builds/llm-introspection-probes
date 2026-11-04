@@ -103,30 +103,38 @@ No token is needed, because Qwen3-4B is ungated. There are no other steps.
 **What it does**
 
 1. Checks `nvidia-smi`, GPU memory, disk and RAM, and stops with a plain message if the machine cannot do this. It uses every GPU with 18 GB free, and says so if that is fewer than 4.
-2. Builds a venv, reusing a working CUDA torch from the machine if there is one and otherwise installing the build that matches the driver. What happened is recorded in `environment.txt`.
+2. Builds a venv on Python 3.11 to 3.13, trying `python3.13`, `python3.12`, `python3.11` and then `python3`. If none exists it installs one with uv, which needs no sudo, or with `apt-get` as root. It reuses a working CUDA torch from the machine if there is one and otherwise installs the build that matches the driver. What happened is recorded in `environment.txt`.
 3. Downloads the model once, before any worker starts.
-4. Runs the dry-run checks on one GPU: the prompt ends in the answer prefix, clean top tokens are digits, label mass is near 1 on prefixed tasks, the sham is exactly 0, and batch size does not change logits. It prints prompts per second and an estimated finish time. If any check fails, it stops here.
-5. Runs concept vectors, the calibration grid, the impact search, screening and the test stage, with one process per GPU. Each stage must finish on all workers before the next one starts. Progress and GPU use are printed about once a minute.
+4. Runs the dry-run checks on one GPU: every prompt of every stage builds, the prompt ends in the answer prefix, clean top tokens are digits, label mass is near 1 on prefixed tasks, the sham is within its limit, and batch size does not change logits. It prints prompts per second, timed through the real row code, and an estimated finish time. If any check fails, it stops here.
+5. Runs concept vectors, the calibration grid, the impact search, screening and the test stage, with one process per GPU. Each stage must finish on all workers before the next one starts. Progress, measured prompts per second per GPU, an ETA and GPU use are printed about once a minute.
 6. Merges the shards, checks the merged trials against the plan, and writes the results.
 
-Checkpoints, the venv and the model cache go to `/workspace/e1_large_qwen3_4b` if `/workspace` is writable, otherwise to `.e1_state/` in the clone. Set `E1_STATE_DIR` to choose another place. A state directory holds one run identity, so changed code needs a new `E1_STATE_DIR`.
+Checkpoints, the venv, the model cache and the results go to `/workspace/e1_large_qwen3_4b` if `/workspace` is writable, otherwise to `.e1_state/` in the clone. Set `E1_STATE_DIR` to choose another place. A state directory holds one run identity, so changed code needs a new `E1_STATE_DIR`.
 
-**How to tell it finished.** The terminal shows a `DONE` or `FAILED` banner. `DONE` is followed by the analysis between `=====BEGIN E1 ANALYSIS=====` and `=====END E1 ANALYSIS=====`. Results are in `results/e1/large_qwen3_4b/` inside the clone: `export.txt`, `analysis.txt`, `dry_run.json`, `results.jsonl`, `merge_report.json`, `run.log` and `SHA256SUMS`. Nothing is pushed anywhere, so copy them off the machine. **The machine bills until you stop it.**
+**How to tell it finished.** The terminal shows a `DONE` or `FAILED` banner, which is also kept in the `status` file in the state directory. `DONE` comes with the analysis between `=====BEGIN E1 ANALYSIS=====` and `=====END E1 ANALYSIS=====`, and with any warnings the run recorded. Results are in `results/` in the state directory, copied to `results/e1/large_qwen3_4b/` inside the clone: `export.txt`, `analysis.txt`, `dry_run.json`, `results.jsonl`, `merge_report.json`, `run.log` and `SHA256SUMS`. Nothing is pushed anywhere, so copy them off the machine. **The machine bills until you stop it.**
 
-**How to resume.** Run the same command again. It is safe at any time:
+**Stopping the machine.** Rented machines have no common way to stop themselves, so set `E1_ON_FINISH` to a command that fits yours:
+
+```bash
+E1_ON_FINISH='runpodctl stop pod "$RUNPOD_POD_ID"' bash mechinterp/scripts/run_e1_gpu.sh
+```
+
+It runs once, after the final state and results are saved, on both `DONE` and `FAILED`, because a failed run bills too. It can read `E1_FINAL_STATUS` to tell them apart. It does not run after an interruption from outside.
+
+**Running it again** is safe at any time:
 
 - While a run is going, it attaches to it. Closing the browser tab or terminal does not stop the run.
-- After a crash or a preempted instance, it continues without repeating finished trials. A different number of GPUs is fine.
-- After a finished run, it prints the results again and starts nothing.
+- After a crash, a preempted instance or a killed process, it resumes without repeating finished trials. A different number of GPUs is fine.
+- After `DONE` or `FAILED`, it prints that final state at once and starts nothing. To resume after `FAILED`, keeping finished trials, run `E1_RETRY=1 bash mechinterp/scripts/run_e1_gpu.sh`.
 
-A worker that dies is restarted up to 3 times, and then the run stops as `FAILED`. A failed run writes no analysis: only a final merge whose trials exactly match the plan can mark a run complete. Worker logs are in `run/logs/` under the state directory.
+**Limits, so that nothing bills forever.** A worker that dies is restarted up to 3 times. A loaded worker with no finished trial for 20 minutes (`E1_STALL_MINUTES`), or one still loading after 30, is killed and restarted once, and a second time ends the run as `FAILED`. Installs, downloads, the dry run and the results step all have time limits, and each says what timed out. A failed run writes no analysis: only a final merge whose trials exactly match the plan can mark a run complete. Worker logs are in `run/logs/` under the state directory.
 
 ### How a sharded run stays the same experiment
 
 - **Same plan.** Trials come from the same planning functions as a single-process run, and go to a worker by a SHA-256 of the trial key. The merged `results.jsonl` is what `export` and `analyze` read, unchanged.
 - **Barriers.** The selection reads the merged grid. The impact search runs on one GPU and reads the merged grid for its target. Test data is untouched until both exist.
-- **Clean baselines.** Every worker runs every clean prompt of a stage itself, which takes seconds, so each injected row is paired with clean logits from its own GPU. The merge keeps one clean row per prompt and fails if shards differ by more than 0.01 logits. `merge_report.json` records the largest gap measured.
-- **Sham.** Every GPU runs the sham check through the real hook before any trial, and the script requires exactly 0. `E1_SHAM_TOLERANCE` overrides that if a machine shows rounding at alpha = 0; the harness's own limit is 1e-4.
+- **Clean baselines.** Every worker runs every clean prompt of a stage itself, which takes seconds, so each injected row is paired with clean logits from its own GPU, and the merge refuses a row that is not. GPUs are compared as soon as those clean prompts finish, at the start of a stage. A gap above 0.01 logits is a loud warning recorded in `merge_report.json`, `results.jsonl` and the analysis, and it does not stop the run, because a steady offset between GPUs cancels in `L`. A fault on one card would not cancel, so a warned run needs comparing by GPU before it is relied on. One probe prompt, measured afresh on each launch before any trial, stops the run above 0.05 logits.
+- **Sham.** Every GPU runs the sham check through the real hook on every launch, before any trial, along with the same clean batch against itself, which separates rounding from a hook fault. The prereg says exactly 0. Any nonzero value up to 1e-4 is a warning recorded in the results, to be logged as a deviation. A larger one stops the run, and `E1_SHAM_TOLERANCE` raises that limit.
 - **Out of memory.** A batch that runs out of memory is split in half and retried. Rows are stored only after a forward pass succeeds, so none is lost or repeated. Batches are never padded.
 - **Config.** `large_4x3090.json` differs from `large.json` only in `batch_size_gpu`. Its config hash therefore differs too, and rows from the two configs refuse to share a store.
 

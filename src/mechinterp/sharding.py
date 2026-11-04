@@ -18,6 +18,7 @@ final merge, after the merged keys have been checked against the plan.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -58,9 +59,15 @@ except ImportError:  # Windows, where this repo is edited but never run.
 
 STAGE_ORDER = ("vectors", "grid", "impact", "screen", "test", "stop")
 STAGE_PHASE = {"grid": PHASE_GRID, "impact": PHASE_IMPACT, "screen": PHASE_SCREEN, "test": PHASE_TEST}
-# Same model, same prompt, different GPU or process. Rounding is around 1e-5 logits, and every decision in
-# the prereg sits far above this, so a larger gap means a faulty card or a bug rather than numerics.
+# Same model, same prompt, different GPU or process. Rounding is around 1e-5 logits, so a larger gap is worth
+# a loud warning. It does not stop the run: L compares each injected row with clean logits from its own GPU,
+# so a steady offset between GPUs cancels, and stored rows would make such a failure permanent.
 CLEAN_AGREEMENT_TOLERANCE = 1e-2
+# One unstored probe prompt, measured afresh on every launch, before any trial. A gap this large is the size of
+# the prereg's smallest meaningful denominator, so it stops the run. A rerun measures it again from scratch.
+PROBE_FAILURE_GAP = 0.05
+# A row's m_clean must come from the clean row in its own shard file, so only float formatting can differ.
+OWN_SHARD_PAIRING_TOLERANCE = 1e-6
 EXIT_FATAL = 3
 BYTES_PER_GB = 1024**3
 BEGIN_ANALYSIS = "=====BEGIN E1 ANALYSIS====="
@@ -116,6 +123,10 @@ class RunPaths:
         return self.out_dir / "preflight" / "dry_run.json"
 
     @property
+    def failure_reason(self) -> Path:
+        return self.out_dir / "failure_reason.txt"
+
+    @property
     def stages_dir(self) -> Path:
         return self.out_dir / "stages"
 
@@ -133,6 +144,9 @@ class RunPaths:
 
     def stage_done(self, stage: str, shard: int) -> Path:
         return self.stages_dir / f"done_{stage}_w{shard}"
+
+    def stage_clean_done(self, stage: str, shard: int) -> Path:
+        return self.stages_dir / f"clean_done_{stage}_w{shard}"
 
     def setup(self, shard: int) -> Path:
         return self.out_dir / "setup" / f"w{shard}.json"
@@ -155,9 +169,12 @@ def try_lock(path: Path) -> Any:
         return handle
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
+    except OSError as error:
+        if error.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            handle.close()
+            return None
+        # A filesystem without locks is not "someone holds it", which would wait forever.
+        print(f"WARNING: locks do not work at {path} ({error}). Carrying on without this lock.", flush=True)
     return handle
 
 
@@ -224,21 +241,36 @@ class RunPlan:
         return [clean_store_key(key) for key in plan_clean_keys(self.test_tasks, self.stimuli.clusters_test)]
 
 
-def setup_payload(session: Any, probe: list[float], gpu_name: str | None) -> dict[str, Any]:
+def setup_payload(session: Any, probe: list[float], gpu_name: str | None, sham: dict[str, Any]) -> dict[str, Any]:
     return {
         "identity": session.identity,
         "stimuli": asdict(session.stimuli),
         "test_tasks": list(session.test_tasks),
-        "sham_max_abs_L": session.store.get("sham")["max_abs_L"],
+        "sham_max_abs_L": sham["max_abs_L"],
+        "clean_repeat_max_abs": sham["clean_repeat_max_abs"],
         "probe_label_logits": probe,
         "gpu_name": gpu_name,
     }
 
 
+def sham_failure_message(worker: int | str, value: float, repeat: float | None, tolerance: float) -> str:
+    return (
+        f"Sham check failed on worker {worker}: |L| = {value} at alpha = 0, above the limit of {tolerance}. "
+        f"The same clean batch run twice differed by {repeat}: if that is about as large, this is rounding, and "
+        "otherwise suspect the hook. To accept it, set E1_SHAM_TOLERANCE to a larger value and rerun with "
+        "E1_RETRY=1. The prereg says exactly 0, so log that as a deviation."
+    )
+
+
 def check_setups(setups: Sequence[dict[str, Any]], sham_tolerance: float) -> dict[str, Any]:
-    """Before any trial runs: all workers must be the same run, and every GPU must pass the sham check."""
+    """Before any trial runs: all workers must be the same run, and every GPU must pass the sham check.
+
+    A sham of exactly 0 is silent. A small nonzero one is a warning that reaches the results, and only a
+    value above the limit stops the run. The values here were measured afresh in this launch.
+    """
     first = setups[0]
     probe_gap = 0.0
+    warnings: list[str] = []
     for index, setup in enumerate(setups):
         differences = identity_differences(first["identity"], setup["identity"])
         if differences:
@@ -246,18 +278,42 @@ def check_setups(setups: Sequence[dict[str, Any]], sham_tolerance: float) -> dic
         for name in ("stimuli", "test_tasks"):
             if setup[name] != first[name]:
                 raise RunFailed(f"Worker {index} planned different {name} from worker 0")
-        if abs(setup["sham_max_abs_L"]) > sham_tolerance:
-            raise RunFailed(
-                f"Sham check failed on worker {index}: |L| = {setup['sham_max_abs_L']} at alpha = 0, "
-                f"tolerance {sham_tolerance}"
+        sham = abs(setup["sham_max_abs_L"])
+        repeat = setup.get("clean_repeat_max_abs")
+        if sham > sham_tolerance:
+            raise RunFailed(sham_failure_message(index, sham, repeat, sham_tolerance))
+        if sham != 0.0:
+            warnings.append(
+                f"Sham on worker {index} was |L| = {sham}, not the exactly 0 the prereg says, and the same clean "
+                f"batch run twice differed by {repeat}. It is within the limit of {sham_tolerance}, so the run "
+                "went on. Log this as a deviation."
             )
         if len(setup["probe_label_logits"]) != len(first["probe_label_logits"]):
             raise RunFailed(f"Worker {index} scored a different number of labels from worker 0")
         for mine, theirs in zip(setup["probe_label_logits"], first["probe_label_logits"]):
             probe_gap = max(probe_gap, abs(mine - theirs))
+    if probe_gap > PROBE_FAILURE_GAP:
+        raise RunFailed(
+            f"Workers disagree by {probe_gap} logits on one identical prompt, so suspect a faulty GPU. Nothing about "
+            "this check is stored: rerun with E1_RETRY=1 to measure again, and leave a bad card out with "
+            "CUDA_VISIBLE_DEVICES."
+        )
     if probe_gap > CLEAN_AGREEMENT_TOLERANCE:
-        raise RunFailed(f"Workers disagree by {probe_gap} logits on one identical prompt: suspect a faulty GPU")
-    return {"probe_max_abs_diff": probe_gap, "gpus": [setup.get("gpu_name") for setup in setups]}
+        warnings.append(f"Workers disagreed by {probe_gap} logits on one identical prompt before any trial.")
+    return {"probe_max_abs_diff": probe_gap, "gpus": [setup.get("gpu_name") for setup in setups], "warnings": warnings}
+
+
+def check_stored_identities(files: Iterable[Path], identity: dict[str, Any]) -> None:
+    """Rows from another worker count count as done, so all files must be this run before any stage starts."""
+    for path in files:
+        for record in read_records(path):
+            if record.get("kind") == "manifest":
+                differences = identity_differences(identity, record.get("identity") or {})
+                if differences:
+                    raise RunFailed(
+                        f"{path} was written by a different run, differing in {differences}. "
+                        "Set E1_STATE_DIR to a new directory for changed code or libraries."
+                    )
 
 
 # Merging
@@ -288,6 +344,8 @@ class Collected:
     shams: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
     impact_matches: list[dict[str, Any]] = field(default_factory=list)
+    trial_file: dict[str, str] = field(default_factory=dict)
+    clean_by_file: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 def collect(files: Iterable[Path]) -> Collected:
@@ -299,8 +357,10 @@ def collect(files: Iterable[Path]) -> Collected:
                 collected.manifests.append(record)
             elif kind == "trial":
                 collected.trials.append(record)
+                collected.trial_file[record["key"]] = path.name
             elif kind == "clean":
                 collected.cleans.setdefault(record["key"], []).append(record)
+                collected.clean_by_file[(path.name, record["key"])] = record
             elif kind == "sham":
                 collected.shams.append(record)
             elif kind == "vector_diagnostics":
@@ -320,7 +380,11 @@ def _trials_of_phase(collected: Collected, phase: str, plan_trials: Sequence[Tri
 
 
 def _canonical_clean(collected: Collected, keys: Sequence[str], label: str) -> tuple[list[dict[str, Any]], float]:
-    """One clean row per key, from the first shard, after checking that all shards agree with it."""
+    """One clean row per key, from the first shard, and the largest gap between shards in logits.
+
+    Different tokens are an error. A gap in logits is returned, for the caller to report: see
+    CLEAN_AGREEMENT_TOLERANCE for why it does not stop the run.
+    """
     canonical = []
     worst = 0.0
     for key in keys:
@@ -336,25 +400,42 @@ def _canonical_clean(collected: Collected, keys: Sequence[str], label: str) -> t
             for mine, theirs in zip(copy["logits"], first["logits"]):
                 worst = max(worst, abs(mine - theirs))
         canonical.append(first)
-    if worst > CLEAN_AGREEMENT_TOLERANCE:
-        raise MergeError(f"{label}: clean logits differ by {worst} between shards: suspect a faulty GPU")
     return canonical, worst
 
 
-def _check_pairing(rows: Sequence[dict[str, Any]], clean: dict[str, dict[str, Any]], label: str) -> float:
-    """Each injected row must pair with the clean row for its own tokens, and reproduce its m_clean."""
+def clean_gap_warning(worst: float, label: str) -> str:
+    return (
+        f"{label}: clean logits differ by {worst} between GPUs, above the {CLEAN_AGREEMENT_TOLERANCE} that rounding "
+        "could explain. Each injected row pairs with clean logits from its own GPU, so a steady offset cancels in L, "
+        "but a faulty card would not cancel. Compare results by GPU before relying on this run."
+    )
+
+
+def report_clean_agreement(paths: RunPaths, keys: Sequence[str], label: str) -> float:
+    """Say right away how far GPUs agree on the clean prompts they just ran, before hours of trials."""
+    _, worst = _canonical_clean(collect(paths.all_shard_files()), keys, label)
+    if worst > CLEAN_AGREEMENT_TOLERANCE:
+        print(f"WARNING: {clean_gap_warning(worst, label)} The run continues, and this is recorded in the results.", flush=True)
+    else:
+        print(f"{label}: all GPUs agree on the clean logits, largest gap {worst:.3g}", flush=True)
+    return worst
+
+
+def _check_pairing(rows: Sequence[dict[str, Any]], collected: Collected, label: str) -> float:
+    """Each injected row must pair with the clean row in its own shard file, and reproduce its m_clean."""
     worst = 0.0
     for row in rows:
-        record = clean.get(clean_store_key((row["task"], row["cluster"], row["query"])))
+        source = collected.trial_file[row["key"]]
+        record = collected.clean_by_file.get((source, clean_store_key((row["task"], row["cluster"], row["query"]))))
         if record is None:
-            raise MergeError(f"{label}: no clean row for {row['key']}")
+            raise MergeError(f"{label}: no clean row in {source} for {row['key']}")
         if record["prompt_hash"] != row["prompt_hash"]:
             raise MergeError(f"{label}: clean and injected tokens differ for {row['key']}")
         labels = record["logits"][:10]
         target = labels[row["position"]]
         worst = max(worst, abs(row["m_clean"] - (target - (sum(labels) - target) / 9)))
-    if worst > CLEAN_AGREEMENT_TOLERANCE:
-        raise MergeError(f"{label}: m_clean differs from the clean row by {worst}")
+    if worst > OWN_SHARD_PAIRING_TOLERANCE:
+        raise MergeError(f"{label}: m_clean differs from the clean row in its own shard by {worst}")
     return worst
 
 
@@ -364,11 +445,14 @@ def merge(
     selection: dict[str, Any] | None = None,
     finished: Sequence[str] = (),
     complete: bool = False,
+    sham_tolerance: float = SHAM_TOLERANCE,
+    extra_warnings: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Write results.jsonl from the shard files, holding only finished stages, in chronological order.
 
     Rows from a stage that has not been finished in this launch are left out. Raises rather than writes
-    if any key is repeated, missing or unplanned, if identities differ, or if shards disagree.
+    if any key is repeated, missing or unplanned, if identities differ, or if a row is not paired with its
+    own shard's clean row. Measured gaps that do not invalidate a row become warnings in the results.
     """
     collected = collect(paths.all_shard_files())
     if not collected.manifests:
@@ -385,8 +469,14 @@ def merge(
     if not collected.shams:
         raise MergeError("No sham check in any shard")
     worst_sham = max(record["max_abs_L"] for record in collected.shams)
-    if worst_sham > SHAM_TOLERANCE:
-        raise MergeError(f"A shard's sham check gave |L| = {worst_sham}")
+    if worst_sham > sham_tolerance:
+        raise MergeError(f"A shard's sham check gave |L| = {worst_sham}, above the limit of {sham_tolerance}")
+    warnings = list(extra_warnings)
+    if worst_sham != 0.0:
+        warnings.append(
+            f"Stored sham reached |L| = {worst_sham}, not the exactly 0 the prereg says. It is within the limit of "
+            f"{sham_tolerance}. Log this as a deviation."
+        )
     sham = {"key": "sham", "kind": "sham", "max_abs_L": worst_sham, "n": collected.shams[0]["n"], "n_checks": len(collected.shams)}
 
     if not collected.diagnostics:
@@ -405,12 +495,14 @@ def merge(
     clean_rows, clean_gap = _canonical_clean(collected, plan.clean_calibration(), "calibration clean")
     clean_by_key = {record["key"]: record for record in clean_rows}
     records.extend(clean_rows)
+    if clean_gap > CLEAN_AGREEMENT_TOLERANCE:
+        warnings.append(clean_gap_warning(clean_gap, "calibration clean"))
     pairing_gap = 0.0
 
     def add_phase(phase: str, plan_trials: Sequence[Trial]) -> None:
         nonlocal pairing_gap
         rows = _trials_of_phase(collected, phase, plan_trials, phase)
-        pairing_gap = max(pairing_gap, _check_pairing(rows, clean_by_key, phase))
+        pairing_gap = max(pairing_gap, _check_pairing(rows, collected, phase))
         records.extend(rows)
         report["trials_by_phase"][phase] = len(rows)
 
@@ -429,12 +521,15 @@ def merge(
     if "test" in finished:
         test_clean, test_gap = _canonical_clean(collected, plan.clean_test(), "test clean")
         clean_gap = max(clean_gap, test_gap)
+        if test_gap > CLEAN_AGREEMENT_TOLERANCE:
+            warnings.append(clean_gap_warning(test_gap, "test clean"))
         clean_by_key.update({record["key"]: record for record in test_clean})
         records.extend(test_clean)
         add_phase(PHASE_TEST, plan.test(selection["layer"], selection["alpha"], impact_match["alpha_impact"]))
 
     report["clean_max_abs_diff_between_shards"] = clean_gap
-    report["m_clean_max_abs_diff_from_canonical"] = pairing_gap
+    report["m_clean_max_abs_diff_within_own_shard"] = pairing_gap
+    report["warnings"] = warnings
     if complete:
         allowed_phases = {STAGE_PHASE[stage] for stage in ("grid", *finished)}
         stray = {record["phase"] for record in collected.trials} - allowed_phases
@@ -450,6 +545,7 @@ def merge(
                 "finished_unix": time.time(),
                 "n_shard_files": len(report["shard_files"]),
                 "clean_max_abs_diff_between_shards": clean_gap,
+                "warnings": warnings,
             }
         )
     keys = [record["key"] for record in records]
@@ -492,7 +588,10 @@ class RunOptions:
     poll_seconds: float = 2.0
     progress_seconds: float = 60.0
     restart_delay_seconds: float = 15.0
-    stall_seconds: float = 1800.0
+    stall_seconds: float = 1200.0  # After the model has loaded: no finished trial for this long means wedged.
+    load_stall_seconds: float = 1800.0  # While loading, which writes no rows.
+    max_stall_restarts: int = 1  # Separate from max_restarts, because a wedged GPU rarely recovers.
+    kill_wait_seconds: float = 60.0
     sham_tolerance: float = SHAM_TOLERANCE
     min_free_disk_bytes: int = BYTES_PER_GB
     extra_env: dict[str, str] = field(default_factory=dict)
@@ -507,6 +606,7 @@ class WorkerPool:
         self.n = len(options.devices)
         self.processes: dict[int, subprocess.Popen] = {}
         self.restarts = {index: 0 for index in range(self.n)}
+        self.stalls = {index: 0 for index in range(self.n)}
         self.stopping = False
 
     def _command(self, shard: int) -> list[str]:
@@ -527,6 +627,8 @@ class WorkerPool:
             str(self.n),
             "--load-slots",
             str(options.load_slots),
+            "--sham-tolerance",
+            str(options.sham_tolerance),
         ]
         if options.devices[shard]:
             command.append("--require-cuda")
@@ -591,7 +693,18 @@ class WorkerPool:
         self.restarts[shard] += 1
         print(f"Restarting worker {shard}, attempt {self.restarts[shard]} of {self.options.max_restarts}", flush=True)
         time.sleep(self.options.restart_delay_seconds)
+        # The restarted worker is loading again, so the longer limit applies until it writes this anew.
+        self.paths.setup(shard).unlink(missing_ok=True)
         self.start(shard)
+
+    def _last_activity(self, shard: int) -> float:
+        times = []
+        for path in (self.paths.shard_file(shard, self.n), self.paths.heartbeat(shard)):
+            try:
+                times.append(path.stat().st_mtime)
+            except OSError:
+                pass
+        return max(times, default=time.time())
 
     def check(self) -> None:
         """Restart any dead or stalled worker, or raise once a worker has used up its restarts."""
@@ -605,15 +718,25 @@ class WorkerPool:
             if code is not None:
                 self._handle_exit(shard, code)
                 continue
-            last = max(
-                (path.stat().st_mtime for path in (self.paths.shard_file(shard, self.n), self.paths.heartbeat(shard)) if path.exists()),
-                default=time.time(),
-            )
-            if time.time() - last > self.options.stall_seconds:
-                print(f"Worker {shard} wrote nothing for {self.options.stall_seconds:.0f} s, so it is being killed", flush=True)
-                process.kill()
-                process.wait()
-                self._handle_exit(shard, -9)
+            loaded = self.paths.setup(shard).exists()
+            limit = self.options.stall_seconds if loaded else self.options.load_stall_seconds
+            if time.time() - self._last_activity(shard) <= limit:
+                continue
+            doing = "finished no trial" if loaded else "did not finish loading the model"
+            print(f"Worker {shard} {doing} for {limit / 60:.0f} minutes, so its GPU may be wedged. Killing it.", flush=True)
+            self.stalls[shard] += 1
+            if not kill_bounded(process, self.options.kill_wait_seconds):
+                raise RunFailed(
+                    f"Worker {shard} {doing} for {limit / 60:.0f} minutes and cannot be killed, so it is stuck in the "
+                    "GPU driver. This machine probably needs a reboot."
+                )
+            if self.stalls[shard] > self.options.max_stall_restarts:
+                raise RunFailed(
+                    f"Worker {shard} {doing} for {limit / 60:.0f} minutes, {self.stalls[shard]} times in this launch, "
+                    "so its GPU looks wedged and the run stopped. Finished trials are safe. Check nvidia-smi, then "
+                    "rerun with E1_RETRY=1."
+                )
+            self._handle_exit(shard, -9)
 
     def stop(self) -> None:
         self.stopping = True
@@ -625,29 +748,52 @@ class WorkerPool:
             try:
                 process.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                if not kill_bounded(process, self.options.kill_wait_seconds):
+                    print(f"WARNING: process {process.pid} cannot be killed, so it is being left behind.", flush=True)
 
 
-def gpu_line() -> str:
-    if shutil.which("nvidia-smi") is None:
-        return "no nvidia-smi"
+def kill_bounded(process: subprocess.Popen, seconds: float) -> bool:
+    """Kill and wait a limited time. A process stuck in the GPU driver ignores even SIGKILL."""
+    process.kill()
     try:
-        output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,temperature.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return "nvidia-smi did not answer"
+        process.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def format_gpu_output(output: str) -> str:
+    """One status line from nvidia-smi's CSV. It can print [N/A] or [Unknown Error] in any field."""
     parts = []
     for line in output.strip().splitlines():
         fields = [item.strip() for item in line.split(",")]
-        if len(fields) == 4:
-            parts.append(f"gpu{fields[0]} {fields[1]}% {int(fields[2]) / 1024:.1f}GiB {fields[3]}C")
+        if len(fields) != 4:
+            parts.append(line.strip())
+            continue
+        try:
+            memory = f"{int(fields[2]) / 1024:.1f}GiB"
+        except ValueError:
+            memory = fields[2]
+        parts.append(f"gpu{fields[0]} {fields[1]}% {memory} {fields[3]}C")
     return " | ".join(parts)
+
+
+def gpu_line(command: Sequence[str] | None = None, seconds: float = 15.0) -> str:
+    """Never blocks past the limit. After a GPU falls off the bus nvidia-smi can stick forever, so a timeout
+    leaves it behind instead of waiting for it, which is what subprocess.run would do."""
+    command = list(command or ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,temperature.gpu", "--format=csv,noheader,nounits"])
+    if shutil.which(command[0]) is None:
+        return f"no {command[0]}"
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return f"{command[0]} did not start"
+    try:
+        output, _ = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return f"{command[0]} did not answer in {seconds:.0f} s, so a GPU may be wedged"
+    return format_gpu_output(output)
 
 
 def _duration(seconds: float) -> str:
@@ -655,54 +801,91 @@ def _duration(seconds: float) -> str:
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
+def estimate_seconds_left(
+    totals: dict[str, int], counts: dict[str, int], prompts_per_second_all_gpus: float, n_workers: int
+) -> float:
+    """From measured speed. The impact search runs on one GPU, and is counted at its worst case."""
+    if prompts_per_second_all_gpus <= 0:
+        raise ValueError("A speed must have been measured")
+    seconds = 0.0
+    for phase, total in totals.items():
+        left = max(0, total - counts.get(phase, 0))
+        rate = prompts_per_second_all_gpus / n_workers if phase == PHASE_IMPACT else prompts_per_second_all_gpus
+        seconds += left / rate
+    return seconds
+
+
 class Progress:
     """Prints stage progress about once a minute, counting rows without parsing them."""
 
-    def __init__(self, paths: RunPaths, totals: dict[str, int], seconds: float) -> None:
+    def __init__(self, paths: RunPaths, totals: dict[str, int], seconds: float, n_workers: int = 1) -> None:
         self.paths = paths
         self.totals = totals
         self.seconds = seconds
+        self.n_workers = n_workers
         self.last_print = 0.0
-        self.stage_started = time.monotonic()
-        self.stage_base = 0
+        self.last_measure = time.monotonic()
+        self.last_by_file: dict[str, int] = {}
         self.best_rate = 0.0
 
-    def counts(self) -> Counter:
-        counts: Counter = Counter()
+    def counts_by_file(self) -> dict[str, Counter]:
+        counts: dict[str, Counter] = {}
         for path in self.paths.all_shard_files():
             raw = path.read_bytes()
             # Stores write compact JSON, so these byte patterns are exact.
-            for phase in self.totals:
-                counts[phase] += raw.count(f'"phase":"{phase}"'.encode("ascii"))
+            counts[path.stem] = Counter(
+                {phase: raw.count(f'"phase":"{phase}"'.encode("ascii")) for phase in self.totals}
+            )
         return counts
 
     def begin(self, phase: str | None) -> None:
-        self.stage_started = time.monotonic()
-        self.stage_base = self.counts()[phase] if phase else 0
         self.last_print = 0.0
+        self.last_measure = time.monotonic()
+        self.last_by_file = {}
 
     def tick(self, phase: str | None, restarts: dict[int, int]) -> None:
         now = time.monotonic()
         if now - self.last_print < self.seconds:
             return
         self.last_print = now
-        counts = self.counts()
         parts = [f"[{time.strftime('%H:%M:%S')}]"]
+        per_gpu = ""
         if phase:
+            by_file = self.counts_by_file()
+            counts: Counter = Counter()
+            for file_counts in by_file.values():
+                counts.update(file_counts)
             total = self.totals[phase]
             done = counts[phase]
-            rate = (done - self.stage_base) / max(1.0, now - self.stage_started)
-            self.best_rate = max(self.best_rate, rate)
-            stage_eta = _duration((total - done) / rate) if rate > 0 else "?"
-            parts.append(f"{phase} {done}/{total} {rate:.1f}/s stage ETA {stage_eta}")
-            remaining = sum(max(0, self.totals[name] - counts[name]) for name in self.totals)
-            if self.best_rate > 0:
-                parts.append(f"all ETA at most {_duration(remaining / self.best_rate)}")
+            current = {name: file_counts[phase] for name, file_counts in by_file.items()}
+            elapsed = max(1.0, now - self.last_measure)
+            # Nothing to compare with on the first tick of a stage, so that one only sets the baseline.
+            rates = {name: (current[name] - self.last_by_file[name]) / elapsed for name in current if name in self.last_by_file}
+            measured = bool(self.last_by_file)
+            self.last_by_file = current
+            self.last_measure = now
+            rate = sum(rates.values())
+            if phase != PHASE_IMPACT:
+                self.best_rate = max(self.best_rate, rate)
+            parts.append(f"{phase} {done}/{total}")
+            if measured:
+                parts.append(f"{rate:.1f} prompts/s")
+                stage_rate = rate if rate > 0 else 0.0
+                parts.append(f"stage ETA {_duration((total - done) / stage_rate) if stage_rate else '?'}")
+                speed = self.best_rate or rate * self.n_workers
+                if speed > 0:
+                    left = estimate_seconds_left(self.totals, counts, speed, self.n_workers)
+                    finish = time.strftime("%H:%M", time.localtime(time.time() + left))
+                    parts.append(f"all stages about {_duration(left)}, finishing about {finish}")
+                wanted = {name: value for name, value in rates.items() if value > 0 or name.endswith(f"of{self.n_workers}")}
+                per_gpu = "           per GPU: " + "  ".join(f"{name} {value:.1f}/s" for name, value in sorted(wanted.items()))
         else:
             parts.append("setting up")
         if any(restarts.values()):
             parts.append(f"restarts {sum(restarts.values())}")
         print("  ".join(parts), flush=True)
+        if per_gpu:
+            print(per_gpu, flush=True)
         print(f"           {gpu_line()}", flush=True)
 
 
@@ -735,10 +918,13 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
         while not condition():
             pool.check()
             if progress is not None:
-                progress.tick(phase, pool.restarts)
+                try:
+                    progress.tick(phase, pool.restarts)
+                except Exception as error:  # Monitoring must never stop a healthy run.
+                    print(f"WARNING: could not print progress: {error!r}", flush=True)
             time.sleep(options.poll_seconds)
 
-    def run_stage(index: int, spec: dict[str, Any], progress: Progress) -> None:
+    def run_stage(index: int, spec: dict[str, Any], progress: Progress, clean_keys: Sequence[str] = ()) -> None:
         stage = STAGE_ORDER[index]
         participants = stage_participants(stage, n_workers)
         if stage == "screen" and not config.screening.enabled:
@@ -747,7 +933,17 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
         progress.begin(phase)
         print(f"[{time.strftime('%H:%M:%S')}] Stage {stage} starts on workers {participants}", flush=True)
         write_json(paths.stage_spec(index), {"stage": stage, "participants": participants, **spec})
-        wait(lambda: all(paths.stage_done(stage, shard).exists() for shard in participants), phase, progress)
+        clean_pending = bool(clean_keys)
+
+        def stage_finished() -> bool:
+            nonlocal clean_pending
+            # Workers do not wait for this: it reports, and a measured gap does not stop them.
+            if clean_pending and all(paths.stage_clean_done(stage, shard).exists() for shard in participants):
+                clean_pending = False
+                report_clean_agreement(paths, clean_keys, f"{stage} stage clean")
+            return all(paths.stage_done(stage, shard).exists() for shard in participants)
+
+        wait(stage_finished, phase, progress)
         print(f"[{time.strftime('%H:%M:%S')}] Stage {stage} finished on all its workers", flush=True)
 
     try:
@@ -757,7 +953,14 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
         setups = [read_json(paths.setup(shard)) for shard in range(n_workers)]
         setup_report = check_setups(setups, options.sham_tolerance)
         print(f"All workers agree. {setup_report}", flush=True)
+        run_warnings = setup_report["warnings"]
+        for warning in run_warnings:
+            print(f"WARNING: {warning}", flush=True)
+        check_stored_identities(paths.all_shard_files(), setups[0]["identity"])
         plan = RunPlan.from_setup(config, setups[0])
+
+        def merge_now(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return merge(paths, plan, *args, sham_tolerance=options.sham_tolerance, extra_warnings=run_warnings, **kwargs)
 
         grid = plan.grid()
         totals = {
@@ -767,12 +970,12 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
             PHASE_TEST: len(plan.test(0, 1.0, 1.0)),
         }
         print(f"Plan: {totals}", flush=True)
-        progress = Progress(paths, totals, options.progress_seconds)
+        progress = Progress(paths, totals, options.progress_seconds, n_workers)
         run_stage(STAGE_ORDER.index("vectors"), {}, progress)
-        run_stage(STAGE_ORDER.index("grid"), {}, progress)
+        run_stage(STAGE_ORDER.index("grid"), {}, progress, plan.clean_calibration())
 
         # Barrier: the selection reads every shard's grid rows, and nothing later can start before it.
-        merged = merge(paths, plan)
+        merged = merge_now()
         grid_rows = [record for record in merged["collected"].trials if record["phase"] == PHASE_GRID]
         selection = selection_record(grid_rows, plan)
         control = ResultStore(paths.control)
@@ -785,7 +988,7 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
         selection_fields = {name: selection[name] for name in Selection.__dataclass_fields__}
 
         run_stage(STAGE_ORDER.index("impact"), {"selection": selection_fields}, progress)
-        merged = merge(paths, plan, selection, ["impact"])
+        merged = merge_now(selection, ["impact"])
         impact_matches = merged["collected"].impact_matches
         alpha_impact = impact_matches[0]["alpha_impact"]
         print(f"Impact-matched alpha {alpha_impact}, match_ok {impact_matches[0]['match_ok']}", flush=True)
@@ -793,11 +996,11 @@ def orchestrate(options: RunOptions) -> dict[str, Any]:
 
         run_stage(STAGE_ORDER.index("screen"), later, progress)
         finished = ["impact", *(["screen"] if config.screening.enabled else [])]
-        merge(paths, plan, selection, finished)
+        merge_now(selection, finished)
 
-        run_stage(STAGE_ORDER.index("test"), later, progress)
+        run_stage(STAGE_ORDER.index("test"), later, progress, plan.clean_test())
         write_json(paths.stage_spec(STAGE_ORDER.index("stop")), {"stage": "stop", "participants": []})
-        result = merge(paths, plan, selection, [*finished, "test"], complete=True)
+        result = merge_now(selection, [*finished, "test"], complete=True)
         print(f"Merged {result['n_records']} records into {paths.results}. {result['report']}", flush=True)
         return {"already_complete": False, "restarts": dict(pool.restarts), "merge": result["report"], "setup": setup_report}
     finally:
@@ -817,7 +1020,10 @@ def sha256_file(path: Path) -> str:
 
 
 def finalize(out_dir: Path, results_dir: Path, log_path: Path | None = None) -> dict[str, Any]:
-    """Write the final folder from a complete merged store. An incomplete store raises and writes nothing."""
+    """Write the final folder from a complete merged store. An incomplete store raises and writes nothing.
+
+    The data files are copied before the analysis runs, so that a crash in the analysis cannot cost them.
+    """
     from .analysis import analyze, format_report  # Needs numpy, which the orchestrator does not.
     from .export import build_export, encode_export
 
@@ -828,25 +1034,32 @@ def finalize(out_dir: Path, results_dir: Path, log_path: Path | None = None) -> 
     keys = [record["key"] for record in records]
     if len(keys) != len(set(keys)):
         raise RunFailed(f"{paths.results} repeats keys")
-    export = build_export(records)
-    report = analyze(export)
-    if report["outcome"] == "incomplete":
-        raise RunFailed("The analysis says the run is incomplete")
-    analysis_text = format_report(report)
-
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(results_dir / "export.txt", encode_export(export).encode("utf-8"))
-    atomic_write_bytes(results_dir / "analysis.txt", analysis_text.encode("utf-8"))
     for source in (paths.dry_run, paths.merge_report, paths.results, log_path):
         if source is not None and Path(source).exists():
             shutil.copyfile(source, results_dir / Path(source).name)
+    export = build_export(records)
+    atomic_write_bytes(results_dir / "export.txt", encode_export(export).encode("utf-8"))
+    try:
+        report = analyze(export)
+        analysis_text = format_report(report)
+    except Exception as error:
+        raise RunFailed(
+            f"The run is complete and its data is saved in {results_dir}, but the analysis failed: {error!r}. "
+            f"Analyze results.jsonl from there with: python -m mechinterp.cli analyze --out {results_dir}"
+        ) from error
+    if report["outcome"] == "incomplete":
+        raise RunFailed("The analysis says the run is incomplete")
+    atomic_write_bytes(results_dir / "analysis.txt", analysis_text.encode("utf-8"))
     names = sorted(path.name for path in results_dir.iterdir() if path.is_file() and path.name not in ("SHA256SUMS", "summary.txt"))
     hashes = {name: sha256_file(results_dir / name) for name in names}
     atomic_write_bytes(results_dir / "SHA256SUMS", "".join(f"{hashes[name]}  {name}\n" for name in names).encode("utf-8"))
+    run_warnings = export["meta"]["run_warnings"]
     summary = "\n".join(
         [
             f"Outcome: {report['outcome']}",
+            *[f"WARNING: {warning}" for warning in run_warnings],
             f"Results folder: {results_dir}",
             *[f"{hashes[name]}  {results_dir / name}" for name in names],
             "",

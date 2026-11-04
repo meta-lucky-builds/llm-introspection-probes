@@ -15,7 +15,11 @@ import torch
 from .checkpoint import ResultStore, ShardStore
 from .config import Config
 from .design import (
+    PHASE_GRID,
+    SHAM_TOLERANCE,
     Selection,
+    Trial,
+    assert_trial_respects_split,
     plan_clean_keys,
     plan_grid_trials,
     plan_screen_trials,
@@ -31,6 +35,7 @@ from .sharding import (
     STAGE_ORDER,
     read_json,
     setup_payload,
+    sham_failure_message,
     shard_trials,
     touch,
     try_lock,
@@ -115,6 +120,16 @@ def probe_label_logits(session: Session) -> list[float]:
     return [float(value) for value in logits[0, session.label_ids]]
 
 
+def measure_sham(session: Session) -> dict[str, Any]:
+    """|L| at alpha = 0, and the same clean batch against itself, which separates rounding from a hook fault."""
+    value, n = session._measure_sham()
+    cluster = next(iter(session.stimuli.clusters_calibration))
+    input_ids = session._ids_tensor([session._prompt(("T_inj", cluster, None))] * n)
+    first = session._forward(input_ids, None)[:, session.label_ids]
+    second = session._forward(input_ids, None)[:, session.label_ids]
+    return {"max_abs_L": value, "n": n, "clean_repeat_max_abs": float((first - second).abs().max())}
+
+
 def run_stage(session: Session, spec: dict[str, Any], shard: int, n_shards: int, paths: RunPaths) -> None:
     """One worker's part of one stage. Keys already stored are skipped, so this can always be rerun.
 
@@ -130,6 +145,7 @@ def run_stage(session: Session, spec: dict[str, Any], shard: int, n_shards: int,
     calibration_clean = session._calibration_clean_keys()
     if stage == "grid":
         session._run_clean(calibration_clean, keep_full=True)
+        touch(paths.stage_clean_done(stage, shard))
         session._run_trials(shard_trials(plan_grid_trials(stimuli, config), shard, n_shards), measure_js=True)
         return
     selection = Selection(**spec["selection"])
@@ -150,6 +166,7 @@ def run_stage(session: Session, spec: dict[str, Any], shard: int, n_shards: int,
         if "alpha_impact" not in spec:
             raise AssertionError("Test data must not be touched before calibration has finished")
         session._run_clean(plan_clean_keys(session.test_tasks, stimuli.clusters_test))
+        touch(paths.stage_clean_done(stage, shard))
         trials = plan_test_trials(stimuli, config, selection.layer, selection.alpha, spec["alpha_impact"], session.test_tasks)
         session._run_trials(shard_trials(trials, shard, n_shards))
         return
@@ -164,6 +181,7 @@ def worker_main(
     require_cuda: bool = False,
     factory: str | None = None,
     load_slots: int = 1,
+    sham_tolerance: float = SHAM_TOLERANCE,
 ) -> None:
     _watch_parent()
     _apply_thread_limit()
@@ -181,9 +199,14 @@ def worker_main(
         load_slot.close()
     print(f"Worker {shard}/{n_shards}: model on {session.device}, batch size {session.batch_size}", flush=True)
 
-    session._sham_check()
+    # Measured afresh on every launch, and judged by the orchestrator. A failing value is not stored, so a
+    # rerun on a healthy GPU is not held back by it.
+    sham = measure_sham(session)
+    print(f"Worker {shard}: sham |L| = {sham['max_abs_L']}, clean against itself {sham['clean_repeat_max_abs']}", flush=True)
+    if abs(sham["max_abs_L"]) <= sham_tolerance and not session.store.has("sham"):
+        session.store.append([{"key": "sham", "kind": "sham", "max_abs_L": sham["max_abs_L"], "n": sham["n"]}])
     gpu_name = torch.cuda.get_device_name() if session.device.type == "cuda" else None
-    write_json(paths.setup(shard), setup_payload(session, probe_label_logits(session), gpu_name))
+    write_json(paths.setup(shard), setup_payload(session, probe_label_logits(session), gpu_name, sham))
 
     for index in range(len(STAGE_ORDER)):
         spec_path = paths.stage_spec(index)
@@ -206,8 +229,9 @@ def worker_main(
 
 
 def measure_preflight(session: Session) -> dict[str, Any]:
-    """Everything the go or no-go decision reads. Stores nothing beyond the sham record."""
+    """Everything the go or no-go decision reads. Its store is thrown away afterwards."""
     result = session.dry_run(n_batches=3)
+    result.update(build_every_prompt(session))
     cluster = next(iter(session.stimuli.clusters_calibration))
     prompts = {
         task: session._prompt((task, cluster, 0 if task == "T_fact" else None)) for task in session.test_tasks
@@ -221,8 +245,9 @@ def measure_preflight(session: Session) -> dict[str, Any]:
         top_token[task] = decode_token(session.tokenizer, int(logits[0].argmax()))
     result["clean_top_token_by_task"] = top_token
 
-    session._sham_check()
-    result["sham_max_abs_L"] = session.store.get("sham")["max_abs_L"]
+    sham = measure_sham(session)
+    result["sham_max_abs_L"] = sham["max_abs_L"]
+    result["clean_repeat_max_abs"] = sham["clean_repeat_max_abs"]
 
     prompt = prompts["T_inj"]
     single = session._forward(session._ids_tensor([prompt]), None)
@@ -232,8 +257,7 @@ def measure_preflight(session: Session) -> dict[str, Any]:
     result["batch_invariance_max_abs"] = float((many[:, labels] - single[:, labels]).abs().max())
     result["clean_label_mass_recheck"] = float(answer_mass(single, labels)[0])
 
-    throughput = _measure_throughput(session, prompt)
-    result.update(throughput)
+    result.update(_measure_throughput(session, cluster))
     result["logits_to_keep_supported"] = _supports_logits_to_keep(session.model)
     result["n_model_layers"] = len(session.layers)
     result["device"] = str(session.device)
@@ -244,21 +268,65 @@ def measure_preflight(session: Session) -> dict[str, Any]:
     return result
 
 
-def _measure_throughput(session: Session, prompt: Any, n_batches: int = 3) -> dict[str, Any]:
-    """Prompts per second at the real batch size, halving if that does not fit."""
-    batch = session.batch_size
+def build_every_prompt(session: Session) -> dict[str, Any]:
+    """Render and tokenize every prompt the run will use, and check the plan against them.
+
+    This takes tokens only and scores nothing, so it reveals no results. It runs here because a bad word in a
+    test cluster would otherwise first show up hours in, after the grid, the impact search and screening.
+    """
+    stimuli = session.stimuli
+    calibration = plan_clean_keys(["T_inj"], stimuli.clusters_calibration)
+    test = plan_clean_keys(session.test_tasks, stimuli.clusters_test)
+    errors: list[str] = []
+    built = set()
+    for key in [*calibration, *test]:
+        try:
+            session._prompt(key)
+            built.add(key)
+        except ValueError as error:  # The token location and answer token errors are ValueErrors.
+            errors.append(f"{key}: {error}")
+    plan = plan_test_trials(stimuli, session.config, 0, 1.0, 1.0, session.test_tasks)
+    missing = {trial.clean_key for trial in plan} - set(test)
+    if missing:
+        errors.append(f"Test trials need clean prompts outside the plan, such as {sorted(missing, key=str)[:2]}")
+    for trial in plan:
+        assert_trial_respects_split(trial, stimuli)
+    return {"n_prompts_built": len(built), "n_test_trials_planned": len(plan), "prompt_build_errors": errors}
+
+
+def _measure_throughput(session: Session, cluster: str, n_batches: int = 3) -> dict[str, Any]:
+    """Prompts per second through the real row code at the real batch size, including the CPU work per row.
+
+    Uses grid-shaped rows with a seeded random direction on a calibration cluster, in the throwaway store.
+    The JS measured on grid rows makes this slower per row than the test stage, so it is a little cautious.
+    """
+    config = session.config
+    concepts = session.stimuli.concepts_calibration
+    dim = hidden_size(session.model)
+    for concept in concepts:
+        session.random_vectors[concept] = random_unit_vector(dim, config.seed, concept)
+    session._run_clean([("T_inj", cluster, None)], keep_full=True)
+    layer = config.grid.layers[0]
+    cells = [(concept, position) for concept in concepts for position in range(10)]
+    batch = min(session.batch_size, len(cells))
+    alpha = 1000.0  # Gives each timed batch its own keys in the throwaway store, at alpha just above 1.
+
+    def run_batch() -> None:
+        nonlocal alpha
+        alpha += 1.0
+        session._run_trial_batch(
+            [Trial(PHASE_GRID, "T_inj", "random_norm", concept, cluster, position, None, layer, alpha / 1000.0) for concept, position in cells[:batch]],
+            True,
+        )
+
     while True:
         try:
-            input_ids = session._ids_tensor([prompt] * batch)
-            positions = torch.tensor([prompt.positions[row % len(prompt.positions)] for row in range(batch)], device=session.device)
-            vector = random_unit_vector(hidden_size(session.model), session.config.seed, "throughput")
-            injection = (session.config.grid.layers[0], positions, torch.stack([vector] * batch), torch.ones(batch))
             if session.device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats()
-            session._forward(input_ids, injection)  # Warm-up, not timed.
+            run_batch()  # Warm-up, not timed.
             started = time.monotonic()
             for _ in range(n_batches):
-                session._forward(input_ids, injection)
+                run_batch()
             seconds = time.monotonic() - started
             break
         except RuntimeError as error:
@@ -292,21 +360,23 @@ def evaluate_preflight(measured: dict[str, Any], sham_tolerance: float) -> dict[
         "label_mass_near_1_on_prefixed_tasks": all(
             measured["clean_label_mass_by_task"][task] >= MIN_CLEAN_LABEL_MASS for task in prefixed
         ),
-        "sham_is_exactly_zero": abs(measured["sham_max_abs_L"]) <= sham_tolerance,
+        "sham_within_limit": abs(measured["sham_max_abs_L"]) <= sham_tolerance,
+        "every_prompt_builds": not measured["prompt_build_errors"],
         "batch_size_does_not_change_logits": measured["batch_invariance_max_abs"] <= CLEAN_AGREEMENT_TOLERANCE,
     }
 
 
 def _finish_estimate(measured: dict[str, Any], n_workers: int) -> dict[str, Any]:
     counts = measured["prompt_counts"]
-    # Vector prompts are about a quarter of a list prompt's length.
-    equivalent_prompts = sum(counts.values()) - 0.75 * counts["vector_prompts"]
-    rate = measured["measured_prompts_per_second_one_gpu"] * n_workers
-    seconds = equivalent_prompts / rate
+    one_gpu = measured["measured_prompts_per_second_one_gpu"]
+    # Vector prompts are about a quarter of a list prompt's length. The impact search runs on one GPU.
+    impact = counts["impact_search_max"]
+    shared = sum(counts.values()) - impact - 0.75 * counts["vector_prompts"]
+    seconds = shared / (one_gpu * n_workers) + impact / one_gpu
     return {
         "n_workers": n_workers,
-        "total_prompts_at_most": equivalent_prompts,
-        "estimated_hours_at_most": seconds / 3600,
+        "total_prompts_at_most": shared + impact,
+        "estimated_hours": seconds / 3600,
         "estimated_finish": time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(time.time() + seconds)),
     }
 
@@ -342,13 +412,20 @@ def preflight_main(
     print(f"  clean top tokens on T_inj: {measured['clean_top_tokens']}", flush=True)
     print(f"  clean top token by task: {measured['clean_top_token_by_task']}", flush=True)
     print(f"  clean label mass by task: {json.dumps(measured['clean_label_mass_by_task'])}", flush=True)
-    print(f"  sham |L|: {measured['sham_max_abs_L']}", flush=True)
+    print(f"  prompts built: {measured['n_prompts_built']}; test trials planned: {measured['n_test_trials_planned']}", flush=True)
+    for error in measured["prompt_build_errors"][:10]:
+        print(f"  PROMPT ERROR: {error}", flush=True)
+    print(f"  sham |L|: {measured['sham_max_abs_L']}; clean against itself: {measured['clean_repeat_max_abs']}", flush=True)
+    if not checks["sham_within_limit"]:
+        print(f"  {sham_failure_message('in the dry run', measured['sham_max_abs_L'], measured['clean_repeat_max_abs'], sham_tolerance)}", flush=True)
+    elif measured["sham_max_abs_L"] != 0.0:
+        print("  WARNING: the sham is not exactly 0, as the prereg says. It is within the limit, so the run goes on.", flush=True)
     print(f"  logit change from batch size: {measured['batch_invariance_max_abs']}", flush=True)
     print(f"  model layers: {measured['n_model_layers']}; logits_to_keep supported: {measured['logits_to_keep_supported']}", flush=True)
     print(f"  GPU: {measured['gpu_name']}; peak memory {measured['gpu_peak_memory_gib']} GiB", flush=True)
-    print(f"  measured {measured['measured_prompts_per_second_one_gpu']:.2f} prompts/s on one GPU at batch {measured['measured_batch_size']}", flush=True)
+    print(f"  measured {measured['measured_prompts_per_second_one_gpu']:.2f} prompts/s on one GPU at batch {measured['measured_batch_size']}, including per-row scoring", flush=True)
     finish = report["finish"]
-    print(f"  estimate on {n_workers} GPU(s): at most {finish['estimated_hours_at_most']:.2f} h, finishing about {finish['estimated_finish']}", flush=True)
+    print(f"  estimate on {n_workers} GPU(s): about {finish['estimated_hours']:.2f} h, finishing about {finish['estimated_finish']}. Live per-GPU speeds follow once the grid starts.", flush=True)
     for name, ok in checks.items():
         print(f"  check {name}: {'PASS' if ok else 'FAIL'}", flush=True)
     if not measured["logits_to_keep_supported"]:
