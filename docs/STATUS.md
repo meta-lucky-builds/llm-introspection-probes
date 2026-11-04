@@ -35,7 +35,11 @@ Long-running research on alignment, mechanistic interpretability, safety, LLM be
 
 ## Next steps
 1. The E1 small tier (Qwen3-1.7B) is running on Colab as a background process (`/content/run_small.py`; status in `/content/e1_small.status`; up to about 6.6 h). Colab cell `Y3XFylVbUT9h` blocks until it finishes and prints the status. At heartbeats read only that cell's output, and never queue more cells while it runs, because they block the kernel. MCP cell calls time out at 120 s though the cell keeps running. Do not keep an agent polling; it burned the 5-hour limit.
+   Colab tools reset after a reconnect: call `open_colab_browser_connection`, then rewrite the cell, and check `/content/e1_small.status`.
 2. Save the export, analyze against the prereg's decision rules, update [hypotheses](hypotheses.md).
+   - E1 on the rented 4x RTX 3090 waits on the owner. The command is in the README. The owner has been told to save results and to ask before stopping the machine, so E2 can run on it if ready.
+   - **E2 needs fixes before it can run, not yet started.** After the 5-hour limit resets, start a FRESH Opus agent (resuming the builder is costly) to fix: `docs/reviews/E2_review.md` items 1-7 and the tests it lists; the prereg's change-log design correction (F_sham, necessity and sufficiency, undetermined outcome); and the failing test `tests/test_e2_data.py::test_all_six_sets_load_with_the_readme_rules` (98 vs 99 items: find out whether an item is being dropped). Then push, pass CI.
+   - Monitor designs: `docs/designs/monitor_experiments_draft.md`, attack report going to `docs/designs/monitor_experiments_attack.md`. Revise, preregister, build.
 3. Preregister and run the next candidate from the ledger; write GPU-tier code for later.
 
 ## Waiting on the owner

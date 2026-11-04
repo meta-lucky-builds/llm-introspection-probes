@@ -67,6 +67,14 @@ If the gate fails, or both sites come out H3 or mixed, close the J-space line fo
 ## Change log
 All entries below were made before any E2 data was collected, and before any E1 small-tier or large-tier result was seen. The README section on E2 gives further detail.
 
+2026-11-04, design correction after independent review ([review](../reviews/E2_review.md)). This overrides the Stage 3 hypotheses above where they conflict:
+- **The flaw.** The J-space component is expected to hold about 6-7% of a vector's squared norm, so F_res has cosine about 0.97 with F_full. H2 as written would pass almost regardless of how the effect works, so it could not count as evidence.
+- **New family F_sham.** F_full minus a random combination of k = 16 randomly drawn J-lens atoms, scaled so that the removed vector's norm equals that of the J-space component for the same concept and site. It removes as much as F_res does, but not the J-space part. Impact-matched like the others.
+- **H1, replaced by two tests.** *Necessity:* `L(F_sham, t) - L(F_res, t)` lower bound above 0. *Sufficiency:* `L(F_j, t) - L(F_rand, t)` lower bound above 0, and `R(F_j, t)` lower bound at least 0.5. **J-space route** requires both.
+- **H2, replaced.** **Residual route** requires `L(F_sham, t) - L(F_res, t)` upper bound below 10% of `L(F_full, t)`, so removing J-space costs no more than removing the same amount at random, and F_j fails sufficiency.
+- **H3 and precedence are unchanged.** H3 still takes precedence when interpreting. It also needs F_rand matched: if F_rand is unmatched, H3 is untested, and that task and site are reported as undetermined, not classified.
+- **Unmatched families.** If F_j, F_res, F_sham or F_rand misses the match, the affected test is reported as undetermined. Undetermined is distinct from mixed, and does not by itself trigger the stop rule.
+
 2026-11-04, implementation choices the text above left open:
 - **Chinese targets.** The published evaluation sets contain none, so our own table was written. Descriptive only; it does not enter the gate.
 - **Order-of-operations synonyms.** The published sets do not give them, so these are ours, and they affect the gate. Reported so the gate can be recomputed without them.
