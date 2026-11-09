@@ -87,6 +87,12 @@ Each experiment's guide has its run commands and every implementation choice.
 
 **About "independent review":** code, notes and reviews were written by Claude agents under the repository owner's direction. A review here means a separate agent reading the work fresh, not a human peer review. Nothing in this repository has been peer reviewed.
 
+## Related and earlier work
+
+- **Earlier:** Godet's LessWrong post [Introspection via localization](https://www.lesswrong.com/posts/3HXAQEK86Bsbvh4ne) (28 Dec 2025) uses the same which-sentence design and reports prompts that never mention injection scoring close to the introspection prompt on Qwen 2.5 14B, for example "which is most abstract?" at 90.0% against 89.2%. That is an informal version of the question E1 tests with preregistered verdicts and controls.
+- **Earlier:** [Emergent Introspection in AI is Content-Agnostic](https://arxiv.org/abs/2603.05414) (Lederman et al., 5 Mar 2026) is related to E1's finding that a concept vector did no better than a norm-matched random direction.
+- **Earlier:** [A mechanistic study of language model introspection](https://arxiv.org/abs/2609.35108) (Zou et al., 28 Sep 2026) uses norm-matched random-direction controls.
+
 ## Repository map
 
 ```
