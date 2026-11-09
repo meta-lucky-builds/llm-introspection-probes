@@ -107,4 +107,4 @@ tests/                 run in CI on every push
 
 ## Data and licenses
 
-Code is under the [MIT License](LICENSE). The evaluation sets in `experiments/e2_jspace_vector_families/data/evaluations/` are unmodified Apache-2.0 files from [anthropics/jacobian-lens](https://github.com/anthropics/jacobian-lens), [with attribution](experiments/e2_jspace_vector_families/data/evaluations/NOTICE.md). The FIBS dataset has no license tag, so D1 downloads its rows at run time and never stores them here.
+Code is under the [MIT License](LICENSE). The evaluation sets in [`experiments/e2_jspace_vector_families/data/evaluations/`](experiments/e2_jspace_vector_families/data/evaluations/) are unmodified Apache-2.0 files from [anthropics/jacobian-lens](https://github.com/anthropics/jacobian-lens), [with attribution](experiments/e2_jspace_vector_families/data/evaluations/NOTICE.md). The FIBS dataset has no license tag, so D1 downloads its rows at run time and never stores them here.
